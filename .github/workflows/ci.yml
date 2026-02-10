@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  lint:
+    name: Lint Python Code
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pylint black
+
+      - name: Check Python syntax
+        run: python -m py_compile deploy-host.py
+
+      - name: Format check with black
+        run: black --check --diff deploy-host.py
+        continue-on-error: true
+
+      - name: Lint with pylint
+        run: pylint deploy-host.py --disable=C0114,C0115,C0116,R0913,R0914,R0912,R0915
+        continue-on-error: true
+
+  validate-config:
+    name: Validate Config Example
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Validate YAML syntax
+        run: python -c "import yaml; yaml.safe_load(open('config.example.yml'))"
+
+      - name: Check required sections
+        run: |
+          python -c "
+          import yaml
+          config = yaml.safe_load(open('config.example.yml'))
+          required = ['github', 'host', 'runners', 'sizes', 'runner']
+          for section in required:
+              assert section in config, f'Missing required section: {section}'
+          print('✓ All required sections present')
+          "
