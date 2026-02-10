@@ -18,6 +18,7 @@ import subprocess
 import json
 import shlex
 import shutil
+import argparse
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, List, Any
@@ -246,6 +247,107 @@ class HostDeployer:
                 sys.exit(1)
 
         return runners
+
+    def validate_config(self) -> bool:
+        """Validate configuration without deploying"""
+        log("Validating configuration...", "header")
+        errors = []
+        warnings = []
+
+        # Check for placeholder values
+        org = self.config.get('github', {}).get('org', '')
+        if org in ['your-org', '', None]:
+            errors.append("GitHub organization not set in config.yml (still using placeholder 'your-org')")
+
+        prefix = self.config.get('github', {}).get('prefix', '')
+        if not prefix or prefix == '':
+            errors.append("GitHub prefix not set in config.yml")
+
+        # Check host configuration
+        host_config = self.config.get('host', {})
+        if not host_config.get('runner_base'):
+            errors.append("Host runner_base not configured")
+        if not host_config.get('label'):
+            errors.append("Host label not configured")
+        if not host_config.get('docker_user_uid'):
+            errors.append("Host docker_user_uid not configured")
+        if not host_config.get('docker_user_gid'):
+            errors.append("Host docker_user_gid not configured")
+
+        # Check runner configuration
+        runner_config = self.config.get('runner', {})
+        if not runner_config.get('version'):
+            errors.append("Runner version not configured")
+        if not runner_config.get('arch'):
+            errors.append("Runner architecture not configured")
+
+        # Validate runners list
+        if not self.config.get('runners'):
+            errors.append("No runners defined in config.yml")
+        elif len(self.config['runners']) == 0:
+            warnings.append("Runners list is empty - nothing to deploy")
+
+        # Validate runner names and sizes
+        for runner_name in self.config.get('runners', []):
+            try:
+                runner = RunnerConfig(runner_name, self.config)
+                # Check if size is defined
+                if runner.parsed['size'] not in self.config.get('sizes', {}):
+                    errors.append(f"Runner '{runner_name}' uses undefined size '{runner.parsed['size']}'")
+            except ValueError as e:
+                errors.append(f"Invalid runner name '{runner_name}': {e}")
+
+        # Validate sizes
+        if not self.config.get('sizes'):
+            errors.append("No sizes defined in config.yml")
+        else:
+            for size_name, size_config in self.config['sizes'].items():
+                if size_name not in ['xs', 'small', 'medium', 'large', 'max']:
+                    warnings.append(f"Non-standard size name '{size_name}' - expected: xs, small, medium, large, max")
+
+                # Validate size config structure
+                if not isinstance(size_config, dict):
+                    errors.append(f"Size '{size_name}' configuration must be a dictionary")
+                    continue
+
+                # Check for cpus, mem_limit, pids_limit (optional but recommended)
+                if 'cpus' not in size_config and size_name != 'max':
+                    warnings.append(f"Size '{size_name}' missing 'cpus' limit (recommended)")
+                if 'mem_limit' not in size_config and size_name != 'max':
+                    warnings.append(f"Size '{size_name}' missing 'mem_limit' (recommended)")
+                if 'pids_limit' not in size_config and size_name != 'max':
+                    warnings.append(f"Size '{size_name}' missing 'pids_limit' (recommended)")
+
+        # Check for duplicate runner names
+        runner_names = self.config.get('runners', [])
+        if len(runner_names) != len(set(runner_names)):
+            duplicates = [name for name in runner_names if runner_names.count(name) > 1]
+            errors.append(f"Duplicate runner names found: {set(duplicates)}")
+
+        # Print results
+        if errors:
+            log("\n❌ Validation FAILED - Configuration has errors:", "error")
+            for error in errors:
+                log(f"  • {error}", "error")
+
+        if warnings:
+            log("\n⚠️  Warnings:", "warning")
+            for warning in warnings:
+                log(f"  • {warning}", "warning")
+
+        if not errors and not warnings:
+            log("\n✅ Configuration is valid!", "success")
+            log(f"  • Organization: {org}", "info")
+            log(f"  • Prefix: {prefix}", "info")
+            log(f"  • Runners: {len(runner_names)}", "info")
+            log(f"  • Sizes: {len(self.config.get('sizes', {}))}", "info")
+            return True
+        elif not errors:
+            log("\n✅ Configuration is valid (with warnings)", "success")
+            return True
+        else:
+            log("\nPlease fix the errors above and try again.", "error")
+            return False
 
     def _get_git_sha(self) -> str:
         """Get current git commit SHA"""
@@ -833,9 +935,57 @@ WantedBy=multi-user.target
 
 def main():
     """Entry point"""
+    parser = argparse.ArgumentParser(
+        description="Deploy GitHub Actions self-hosted runners",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Validate configuration without deploying
+  ./deploy-host.py --validate
+
+  # Deploy runners
+  sudo -E ./deploy-host.py
+
+  # Deploy with custom config file
+  sudo -E ./deploy-host.py --config custom-config.yml
+        """
+    )
+    parser.add_argument(
+        '--validate',
+        action='store_true',
+        help='Validate configuration without deploying'
+    )
+    parser.add_argument(
+        '--config',
+        default='config.yml',
+        help='Path to configuration file (default: config.yml)'
+    )
+
+    args = parser.parse_args()
+
     try:
-        deployer = HostDeployer()
-        deployer.deploy()
+        deployer = HostDeployer(config_path=args.config)
+
+        if args.validate:
+            # Validation mode - check config and exit
+            log("Running in validation mode (no deployment will occur)\n", "info")
+            if deployer.validate_config():
+                log("\n✅ Configuration is ready for deployment!", "success")
+                sys.exit(0)
+            else:
+                log("\n❌ Configuration has errors. Fix them before deploying.", "error")
+                sys.exit(1)
+        else:
+            # Normal deployment mode
+            # Validate first before deploying
+            if not deployer.validate_config():
+                log("\n❌ Configuration validation failed. Aborting deployment.", "error")
+                log("Run './deploy-host.py --validate' to see detailed errors.", "info")
+                sys.exit(1)
+
+            log("\n" + "="*60, "header")
+            deployer.deploy()
+
     except KeyboardInterrupt:
         log("\nDeployment cancelled by user", "warning")
         sys.exit(1)
