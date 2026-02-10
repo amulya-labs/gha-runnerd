@@ -12,11 +12,78 @@ Host-based runners with **container-first workflows** for maximum flexibility an
 
 ---
 
+## Why gha-runnerd?
+
+**Choose gha-runnerd when you need:**
+
+- **Zero nested container issues** - Unlike docker-in-docker runners, gha-runnerd runs on the host and fully supports `jobs.container`, avoiding compatibility problems with Node-based actions and complex container setups
+- **Lightning-fast caching** - Local cache with sub-second restore times vs GitHub-hosted runners (10-60s cache restore)
+- **Full control over infrastructure** - Custom hardware, GPUs, specialized build tools, compliance requirements, or air-gapped environments
+- **Predictable costs** - No per-minute charges; pay only for your hardware
+- **Container-first workflows** - Use official images (rust:latest, node:20, python:3.11) without pre-installing dependencies on the host
+
+**Comparison with alternatives:**
+
+| Feature | gha-runnerd | GitHub-hosted | actions-runner-controller | docker-compose runners |
+|---------|-------------|---------------|---------------------------|------------------------|
+| `jobs.container` support | ✅ Full | ✅ Full | ✅ Full | ❌ Nested container issues |
+| Cache performance | ⚡ Sub-second | 🐢 10-60s | ⚡ Fast (cluster-dependent) | ⚡ Fast |
+| Kubernetes required | ❌ No | N/A | ✅ Yes | ❌ No |
+| GPU support | ✅ Yes | ✅ Limited | ✅ Yes | ✅ Yes |
+| Setup complexity | 🟢 Low (5 min) | N/A | 🟡 Medium-High | 🟢 Low |
+| Cost model | Fixed (hardware) | Per-minute | Fixed (cluster) | Fixed (hardware) |
+
+**Who is this for?**
+
+- Teams running 50+ builds/day where cache performance and costs matter
+- Organizations with compliance or data residency requirements
+- Projects needing GPU, specialized hardware, or custom tooling
+- Teams migrating from GitHub-hosted runners to reduce costs
+- Developers wanting simple self-hosted runners without Kubernetes overhead
+
+---
+
+## Prerequisites
+
+**System Requirements:**
+- **OS**: Ubuntu 20.04+ or Debian 11+ (systemd-based Linux)
+- **Hardware**:
+  - Minimum: 4 CPU cores, 8GB RAM (for deployment tool + 1-2 runners)
+  - Recommended: 8+ CPU cores, 16GB+ RAM (for multiple concurrent runners)
+  - Disk: 20GB+ free space (more for caching dependencies)
+- **Access**: Root/sudo privileges required for systemd service management
+- **Network**: Internet access to download runner binaries and container images
+
+**Required Tools:**
+```bash
+# 1. Docker (20.10+)
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker $USER
+
+# 2. Python 3.8+ with PyYAML
+pip install -r requirements.txt
+
+# 3. GitHub CLI (gh) - Required for authentication
+# See: https://github.com/cli/cli/blob/trunk/docs/install_linux.md
+# Ubuntu/Debian example:
+sudo apt install gh
+
+# 4. Authenticate with GitHub (required for fetching runner registration tokens)
+gh auth login
+```
+
+**Important Notes:**
+- The script requires `gh` CLI authentication to fetch runner registration tokens automatically
+- Alternatively, manually set `REGISTER_GITHUB_RUNNER_TOKEN` environment variable
+- You need organization admin permissions to register runners
+
+---
+
 ## Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/gha-runnerd.git
+git clone https://github.com/amulya-labs/gha-runnerd.git
 cd gha-runnerd
 
 # Install Python dependencies
@@ -32,18 +99,32 @@ cp config.example.yml config.yml
 ## Quick Start
 
 ```bash
-# Deploy runners (automatically fetches registration token via gh CLI)
-sudo -E ./deploy-host.py
+# Validate configuration first (recommended)
+./deploy-host.py --validate
 
-# Verify
+# Preview what will be deployed (dry-run)
+./deploy-host.py --dry-run
+
+# Deploy runners (will prompt for sudo password when needed)
+./deploy-host.py
+
+# Verify deployment
 sudo systemctl status 'gha-*'
 ```
 
-**Note:** The script will automatically fetch the registration token using `gh` CLI. If not authenticated, run `gh auth login` first. Alternatively, you can manually set the token:
+**Note:**
+- The script automatically fetches the registration token using `gh` CLI (run `gh auth login` first if not authenticated)
+- You'll be prompted for your sudo password with clear explanations of what action requires elevated privileges
+- No need to run the entire script with sudo!
 
-```bash
-export REGISTER_GITHUB_RUNNER_TOKEN=$(gh api -X POST /orgs/${GITHUB_ORG}/actions/runners/registration-token | jq -r .token)
-sudo -E ./deploy-host.py
+**Example sudo prompts you'll see:**
+```
+[INFO   ] 🔒 Requesting sudo access for: creating runner base directory /srv/gha
+[sudo] password for user:
+
+[INFO   ] 🔒 Requesting sudo access for: installing sudoers configuration for workspace cleanup
+[INFO   ] 🔒 Requesting sudo access for: enabling systemd service gha-my-linux-cpu-small-1
+[INFO   ] 🔒 Requesting sudo access for: starting runner service gha-my-linux-cpu-small-1
 ```
 
 ---
@@ -97,13 +178,14 @@ sizes:
 ### Deploy
 
 ```bash
-sudo -E ./deploy-host.py
+./deploy-host.py
 ```
 
 > **Note:**
-> - `sudo` is required to create systemd services and write to `/srv/gha` (owned by `ci-docker`)
-> - The `-E` flag preserves environment variables (if you've manually set `REGISTER_GITHUB_RUNNER_TOKEN`)
-> - Script will automatically fetch registration token via `gh` CLI if not set
+> - You'll be prompted for your sudo password when needed (to create systemd services, directories, etc.)
+> - Script automatically fetches registration token via `gh` CLI if not already set
+> - Use `--dry-run` to preview changes without applying them
+> - Use `--verbose` for detailed logging
 
 ---
 
@@ -308,6 +390,72 @@ jobs:
 
 ---
 
+## Deployment Options
+
+The deployment script supports several flags for different use cases:
+
+### Validate Configuration
+
+Check your configuration for errors before deploying:
+
+```bash
+./deploy-host.py --validate
+```
+
+This validates:
+- Required sections are present
+- Runner names are valid (format: `{type}-{size}-[{category}]-{number}`)
+- Size definitions exist
+- No placeholder values (`your-org`)
+- No duplicate runner names
+
+### Dry-Run Mode
+
+Preview what would be deployed without making any changes:
+
+```bash
+./deploy-host.py --dry-run
+```
+
+Dry-run shows:
+- Which directories would be created
+- Which runners would be registered
+- What systemd services would be created
+- Resource limits for each runner
+
+Perfect for testing configuration changes before applying them.
+
+### Verbose Output
+
+Enable detailed logging for troubleshooting:
+
+```bash
+./deploy-host.py --verbose
+```
+
+Verbose mode shows:
+- Every command being executed
+- Command execution times
+- Environment details
+- Service file contents (in dry-run)
+
+### Combining Flags
+
+You can combine multiple flags:
+
+```bash
+# Validate with verbose output
+./deploy-host.py --validate --verbose
+
+# Dry-run with verbose output to see all details
+./deploy-host.py --dry-run --verbose
+
+# Deploy with verbose logging
+./deploy-host.py --verbose
+```
+
+---
+
 ## Managing Runners
 
 ### Adding Runners
@@ -324,7 +472,7 @@ jobs:
 
 2. Deploy (creates systemd service and registers with GitHub):
    ```bash
-   sudo -E ./deploy-host.py
+   ./deploy-host.py
    ```
 
 **What happens:**
@@ -347,7 +495,7 @@ jobs:
 
 2. Re-deploy (automatically cleans up removed runners):
    ```bash
-   sudo -E ./deploy-host.py
+   ./deploy-host.py
    ```
 
 **What happens:**
@@ -373,7 +521,7 @@ jobs:
 
 2. Re-deploy to apply changes:
    ```bash
-   sudo -E ./deploy-host.py
+   ./deploy-host.py
    ```
 
 **What happens:**
@@ -574,18 +722,240 @@ Caches are automatically shared across jobs on the same runner.
 
 ## Troubleshooting
 
+### Common Issues
+
+#### 1. GitHub CLI Authentication Failed
+
+**Symptom:** Error fetching registration token: "Not authenticated with gh CLI"
+
+**Solution:**
+```bash
+# Authenticate with GitHub
+gh auth login
+
+# Verify authentication
+gh auth status
+
+# Re-run deployment
+./deploy-host.py
+```
+
+**Root cause:** The script needs `gh` CLI access to fetch runner registration tokens.
+
+---
+
+#### 2. Organization Permission Denied
+
+**Symptom:** "Insufficient permissions for the organization" when fetching token
+
+**Solution:**
+1. Verify you have **admin** permissions in the GitHub organization
+2. Check organization name in `config.yml` is correct
+3. Visit GitHub org settings: `https://github.com/organizations/YOUR-ORG/settings/actions/runners`
+4. Ensure you can manually create runners via the UI
+
+**Root cause:** Only organization admins can register self-hosted runners.
+
+---
+
+#### 3. Docker Daemon Not Running
+
+**Symptom:** "Cannot connect to the Docker daemon"
+
+**Solution:**
+```bash
+# Check Docker status
+sudo systemctl status docker
+
+# Start Docker if stopped
+sudo systemctl start docker
+sudo systemctl enable docker
+
+# Verify Docker works
+docker ps
+```
+
+**Root cause:** Docker service must be running for containerized workflows.
+
+---
+
+#### 4. Runner Service Won't Start
+
+**Symptom:** `systemctl status gha-*` shows failed/inactive
+
+**Solution:**
+```bash
+# View detailed logs (last 100 lines)
+sudo journalctl -u gha-{prefix}-linux-{runner-name} -n 100
+
+# Check for common issues:
+# - Registration token expired (re-run deploy-host.py)
+# - Permissions on /srv/gha incorrect (should be 1003:1003)
+# - Runner binary corrupted (delete runner dir and re-deploy)
+
+# Fix permissions
+sudo chown -R 1003:1003 /srv/gha
+
+# Re-deploy runner
+./deploy-host.py
+```
+
+**Root cause:** Usually token expiration or permission issues.
+
+---
+
+#### 5. Runner Not Appearing in GitHub
+
+**Symptom:** Deployment completes but runner doesn't show in GitHub org settings
+
+**Solution:**
+```bash
+# 1. Check service is running
+sudo systemctl status gha-*
+
+# 2. Check runner logs for errors
+sudo journalctl -u gha-{runner-name} -f
+
+# 3. Verify network connectivity to GitHub
+curl -I https://github.com
+
+# 4. Re-run deployment with fresh token
+./deploy-host.py
+```
+
+**Root cause:** Token expired, network issues, or runner failed to register.
+
+---
+
+#### 6. Workspace Permission Denied (EACCES)
+
+**Symptom:** `EACCES: permission denied` during checkout
+
+**Solution:**
+```bash
+# Re-deploy to install cleanup hook
+./deploy-host.py
+
+# Verify cleanup hook exists
+ls -la /srv/gha/{runner-name}/cleanup-workspace.sh
+
+# Verify sudoers entry
+sudo cat /etc/sudoers.d/gha-runner-cleanup
+```
+
+**Root cause:** Docker containers run as root by default, creating files the runner user can't delete. The cleanup hook fixes this before each job.
+
+---
+
+#### 7. Cache Not Working
+
+**Symptom:** "Cache not found" in every workflow run despite using `corca-ai/local-cache`
+
+**Solution:**
+```bash
+# 1. Verify shared cache directory exists
+ls -la /srv/gha-cache/
+# Should show: drwxr-xr-x 1003 1003 /srv/gha-cache
+
+# 2. Create if missing
+sudo mkdir -p /srv/gha-cache
+sudo chown 1003:1003 /srv/gha-cache
+sudo chmod 755 /srv/gha-cache
+
+# 3. Verify workflow has `base: /srv/gha-cache`
+```
+
+**In your workflow:**
+```yaml
+- uses: corca-ai/local-cache@v2
+  with:
+    path: .venv
+    key: poetry-${{ hashFiles('poetry.lock') }}
+    base: /srv/gha-cache  # ← REQUIRED!
+```
+
+**Root cause:** Without `base` parameter, the action uses default cache location which may not be shared.
+
+---
+
+#### 8. Python Dependencies Missing
+
+**Symptom:** "ModuleNotFoundError: No module named 'yaml'"
+
+**Solution:**
+```bash
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Or install PyYAML directly
+pip install pyyaml
+```
+
+**Root cause:** PyYAML not installed on deployment host.
+
+---
+
+#### 9. Port Conflicts (Rare)
+
+**Symptom:** Service fails to start with "address already in use"
+
+**Solution:**
+```bash
+# Check what's using runner ports (unlikely)
+sudo netstat -tulpn | grep -E ':(8080|9091)'
+
+# Runners don't bind ports by default
+# This usually indicates a misconfigured workflow
+```
+
+**Root cause:** Workflow trying to bind to a port already in use by another runner/service.
+
+---
+
+#### 10. Disk Space Exhausted
+
+**Symptom:** Workflows fail with "No space left on device"
+
+**Solution:**
+```bash
+# Check disk usage
+df -h /srv
+
+# Check cache size
+du -sh /srv/gha-cache/
+
+# Clean up old caches (manual)
+# CAREFUL: This deletes ALL cached dependencies
+sudo rm -rf /srv/gha-cache/*
+
+# Clean up Docker images
+docker system prune -af
+
+# Clean up old build artifacts in runner workspaces
+sudo find /srv/gha -name '_work' -type d -exec du -sh {} \;
+sudo rm -rf /srv/gha/*/_work/*  # CAREFUL: Deletes all workspaces
+```
+
+**Root cause:** Accumulated caches, Docker images, and build artifacts.
+
+---
+
+### Quick Reference
+
 | Issue | Solution |
 |-------|----------|
 | PyYAML not installed | `pip install -r requirements.txt` |
+| gh not authenticated | `gh auth login` |
 | Permission denied on `/srv/gha` | `sudo chown -R 1003:1003 /srv/gha` |
-| Workspace permission denied (EACCES) | Re-deploy to install cleanup hook (see below) |
+| Workspace permission denied (EACCES) | Re-deploy to install cleanup hook |
 | Service won't start | `sudo journalctl -u gha-<service> -n 100` |
-| Runner not in GitHub | Check token, re-run `sudo -E ./deploy-host.py` |
+| Runner not in GitHub | Check token, re-run `./deploy-host.py` |
 | GPU not accessible | Install NVIDIA drivers + Container Toolkit |
 | Docker permission denied | `sudo usermod -aG docker ci-docker && sudo systemctl restart 'gha-*'` |
 | Container image pull fails | Check registry credentials, network |
-| Cache not persisting | Verify `/srv/gha-cache` exists with correct ownership (see below) |
-| Cache always misses | Ensure `base: /srv/gha-cache` is set in workflow (see below) |
+| Cache not persisting | Verify `/srv/gha-cache` exists with ownership 1003:1003 |
+| Cache always misses | Ensure `base: /srv/gha-cache` is set in workflow |
+| Disk space exhausted | Clean caches, Docker images, old workspaces |
 
 ### Workspace Permission Issues
 
@@ -594,7 +964,7 @@ When Docker containers run as root (the default), they can create files that the
 **Solution:** The deploy script installs a pre-job cleanup hook that automatically fixes workspace permissions before each job. If you see this error, re-deploy:
 
 ```bash
-sudo -E ./deploy-host.py
+./deploy-host.py
 ```
 
 This creates:
@@ -764,7 +1134,7 @@ sudo mv /srv/gha /srv/gha.docker-backup
 
 # 3. Deploy new setup
 export REGISTER_GITHUB_RUNNER_TOKEN=<token>
-sudo -E ./deploy-host.py
+./deploy-host.py
 
 # 4. Update workflows to use containers
 # Old:
