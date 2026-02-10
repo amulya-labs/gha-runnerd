@@ -187,6 +187,72 @@ sizes:
 > - Use `--dry-run` to preview changes without applying them
 > - Use `--verbose` for detailed logging
 
+### Configuration Reference
+
+All configuration options with their defaults:
+
+```yaml
+# GitHub organization settings (REQUIRED)
+github:
+  org: "your-org"      # GitHub organization name
+  prefix: "my"         # Prefix for service/runner names
+
+# Host environment (REQUIRED)
+host:
+  label: "my-host"              # Host label added to all runners
+  runner_base: "/srv/gha"       # Base directory for runners
+  docker_socket: "/var/run/docker.sock"
+  docker_user_uid: 1003         # UID for runner user
+  docker_user_gid: 1003         # GID for runner user
+
+# Cache configuration (OPTIONAL - defaults shown)
+cache:
+  base_dir: "/srv/gha-cache"    # Shared cache for corca-ai/local-cache
+  permissions: "755"            # Cache directory permissions
+
+# Runner binary settings (REQUIRED)
+runner:
+  version: "2.329.0"            # GitHub Actions runner version
+  arch: "linux-x64"             # Architecture
+  # Optional: Override download URL template
+  # download_url_template: "https://github.com/actions/runner/releases/download/v{version}/actions-runner-{arch}-{version}.tar.gz"
+
+# Systemd service settings (OPTIONAL - defaults shown)
+systemd:
+  restart_policy: "always"      # Restart policy (always, on-failure, no)
+  restart_sec: 10               # Seconds to wait before restart
+
+# Sudoers configuration (OPTIONAL - defaults shown)
+sudoers:
+  path: "/etc/sudoers.d/gha-runner-cleanup"  # Path to sudoers file
+
+# Runners to deploy (REQUIRED)
+runners:
+  - "cpu-small-1"
+  - "cpu-medium-1"
+
+# Size definitions (REQUIRED)
+sizes:
+  xs:
+    cpus: 1.0
+    mem_limit: "2g"
+    pids_limit: 1024
+  small:
+    cpus: 2.0
+    mem_limit: "4g"
+    pids_limit: 2048
+  medium:
+    cpus: 6.0
+    mem_limit: "16g"
+    pids_limit: 4096
+
+# Optional: GitHub API label sync
+github_api:
+  enforce_labels: true          # Sync labels via API (requires gh CLI)
+```
+
+**Note:** All optional sections will use sensible defaults if not specified. See `config.example.yml` for a complete example.
+
 ---
 
 ## Writing Workflows

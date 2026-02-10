@@ -310,6 +310,18 @@ class HostDeployer:
                 log(f"Missing required section in config: {section}", "error")
                 sys.exit(1)
 
+        # Apply defaults for optional sections
+        config.setdefault('cache', {})
+        config['cache'].setdefault('base_dir', '/srv/gha-cache')
+        config['cache'].setdefault('permissions', '755')
+
+        config.setdefault('systemd', {})
+        config['systemd'].setdefault('restart_policy', 'always')
+        config['systemd'].setdefault('restart_sec', 10)
+
+        config.setdefault('sudoers', {})
+        config['sudoers'].setdefault('path', '/etc/sudoers.d/gha-runner-cleanup')
+
         return config
 
     def _parse_runners(self) -> List[RunnerConfig]:
@@ -554,7 +566,7 @@ class HostDeployer:
 
         # Create shared cache directory for corca-ai/local-cache
         # Used as a general cache across ecosystems (e.g. Poetry, npm, Cargo)
-        cache_dir = Path("/srv/gha-cache")
+        cache_dir = Path(self.config['cache']['base_dir'])
         if not cache_dir.exists() or DRY_RUN:
             log(f"Creating shared cache directory {cache_dir}...", "info")
             run_cmd(
@@ -570,11 +582,12 @@ class HostDeployer:
             sudo_reason=f"setting cache directory ownership",
             dry_run_msg=f"Set cache directory ownership {uid}:{gid}"
         )
+        cache_perms = self.config['cache']['permissions']
         run_cmd(
-            ["chmod", "755", str(cache_dir)],
+            ["chmod", cache_perms, str(cache_dir)],
             sudo=True,
             sudo_reason=f"setting cache directory permissions",
-            dry_run_msg=f"Set cache directory permissions 755"
+            dry_run_msg=f"Set cache directory permissions {cache_perms}"
         )
         log("Shared cache directory ready", "success")
 
@@ -602,7 +615,13 @@ class HostDeployer:
 
         version = self.config['runner']['version']
         arch = self.config['runner']['arch']
-        tarball_url = f"https://github.com/actions/runner/releases/download/v{version}/actions-runner-{arch}-{version}.tar.gz"
+
+        # Use custom download URL template if provided, otherwise use default GitHub releases
+        url_template = self.config['runner'].get(
+            'download_url_template',
+            'https://github.com/actions/runner/releases/download/v{version}/actions-runner-{arch}-{version}.tar.gz'
+        )
+        tarball_url = url_template.format(version=version, arch=arch)
         tarball_path = runner_path / "runner.tar.gz"
 
         log_debug(f"Runner version: {version}")
@@ -812,7 +831,7 @@ fi
         uid = self.config['host']['docker_user_uid']
         gid = self.config['host']['docker_user_gid']
         base = self.config['host']['runner_base']
-        sudoers_path = Path("/etc/sudoers.d/gha-runner-cleanup")
+        sudoers_path = Path(self.config['sudoers']['path'])
 
         log("Configuring sudoers for workspace cleanup...", "info")
 
@@ -882,8 +901,8 @@ User={uid}
 Group={gid}
 WorkingDirectory={runner_path}
 ExecStart={runner_path}/run.sh
-Restart=always
-RestartSec=10
+Restart={self.config['systemd']['restart_policy']}
+RestartSec={self.config['systemd']['restart_sec']}
 Environment="HOME={runner_path}"
 Environment="XDG_CACHE_HOME={runner_path}/.cache"
 Environment="ACTIONS_RUNNER_HOOK_JOB_STARTED={hook_path}"
