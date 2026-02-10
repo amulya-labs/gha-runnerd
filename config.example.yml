@@ -1,0 +1,87 @@
+# ============================================================
+# GitHub Actions Runner Stack Configuration
+# ============================================================
+# Single source of truth for all runner configuration.
+#
+# Philosophy: Use generic runners + containers for flexibility
+# - Runners are generic (cpu/gpu) or specialized with optional category
+# - Dependencies live in container images when possible
+# - Use corca-ai/local-cache for fast local caching
+#
+# Naming Convention: {type}-{size}-[{category}]-{number}
+# - type = 'cpu' | 'gpu'
+# - size = 'xs' | 'small' | 'medium' | 'large' | 'max'
+# - category = optional specialization (e.g., 'docker', 'bazel')
+# - number = 1, 2, 3, ...
+#
+# Examples:
+#   cpu-xs-1             → Labels: self-hosted,linux,my-host,cpu,xs,generic
+#   cpu-medium-2         → Labels: self-hosted,linux,my-host,cpu,medium,generic
+#   cpu-medium-docker-1  → Labels: self-hosted,linux,my-host,cpu,medium,docker
+#   gpu-max-1            → Labels: self-hosted,linux,my-host,gpu,max,generic
+#   gpu-large-cuda-1     → Labels: self-hosted,linux,my-host,gpu,large,cuda
+#
+# Auto-generated from name:
+#   - Service name: gha-{prefix}-linux-{full-name}
+#   - Registered name: {prefix}-linux-{full-name}
+#   - Labels: self-hosted,linux,{host_label},{type},{size},{category|generic}
+# ============================================================
+
+# GitHub organization settings
+github:
+  org: "your-org"  # Replace with your GitHub organization name
+  prefix: "my"     # Used in service/runner names (e.g., gha-my-linux-cpu-small-1)
+
+# Host environment
+host:
+  label: "my-host"  # Environment/hostname label added to all runners
+  runner_base: "/srv/gha"
+  docker_socket: "/var/run/docker.sock"
+  docker_user_uid: 1003
+  docker_user_gid: 1003
+
+# List of runners (everything else auto-inferred from name!)
+# Just generic cpu/gpu runners - dependencies live in containers
+runners:
+  - "cpu-xs-1"
+  - "cpu-xs-2"
+  - "cpu-small-1"
+  - "cpu-small-2"
+  - "cpu-medium-1"
+  - "cpu-medium-2"
+  - "cpu-medium-docker-1"  # Specialized for Docker builds
+  - "cpu-large-1"
+  # - "gpu-small-1"  # Uncomment if you have GPU support
+  # - "gpu-max-1"
+
+# Size definitions (CPU/RAM resource limits)
+sizes:
+  xs:
+    cpus: 1.0
+    mem_limit: "2g"
+    pids_limit: 1024
+  small:
+    cpus: 2.0
+    mem_limit: "4g"
+    pids_limit: 2048
+  medium:
+    cpus: 6.0
+    mem_limit: "16g"
+    pids_limit: 4096
+  large:
+    cpus: 12.0
+    mem_limit: "32g"
+    pids_limit: 8192
+  max:
+    cpus: null  # No limits
+    mem_limit: null
+    pids_limit: null
+
+# GitHub Actions runner version
+runner:
+  version: "2.329.0"
+  arch: "linux-x64"
+
+# Optional: GitHub API label sync (requires 'gh' CLI)
+github_api:
+  enforce_labels: true  # Use GitHub API to sync labels (no downtime)
