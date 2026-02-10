@@ -40,6 +40,11 @@ host:
   docker_user_uid: 1003
   docker_user_gid: 1003
 
+# Cache configuration (used by corca-ai/local-cache)
+cache:
+  base_dir: "/srv/gha-cache"  # Shared cache directory for all runners
+  permissions: "755"  # Directory permissions for cache
+
 # List of runners (everything else auto-inferred from name!)
 # Just generic cpu/gpu runners - dependencies live in containers
 runners:
@@ -81,7 +86,18 @@ sizes:
 runner:
   version: "2.329.0"
   arch: "linux-x64"
+  # Optional: Override download URL template (uses GitHub releases by default)
+  # download_url_template: "https://github.com/actions/runner/releases/download/v{version}/actions-runner-{arch}-{version}.tar.gz"
 
 # Optional: GitHub API label sync (requires 'gh' CLI)
 github_api:
   enforce_labels: true  # Use GitHub API to sync labels (no downtime)
+
+# Systemd service configuration
+systemd:
+  restart_policy: "always"  # Restart policy (always, on-failure, no)
+  restart_sec: 10  # Seconds to wait before restarting
+
+# Sudoers configuration for workspace cleanup
+sudoers:
+  path: "/etc/sudoers.d/gha-runner-cleanup"  # Path to sudoers file
