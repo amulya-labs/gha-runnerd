@@ -102,18 +102,29 @@ cp config.example.yml config.yml
 # Validate configuration first (recommended)
 ./deploy-host.py --validate
 
-# Deploy runners (automatically fetches registration token via gh CLI)
-sudo -E ./deploy-host.py
+# Preview what will be deployed (dry-run)
+./deploy-host.py --dry-run
 
-# Verify
+# Deploy runners (will prompt for sudo password when needed)
+./deploy-host.py
+
+# Verify deployment
 sudo systemctl status 'gha-*'
 ```
 
-**Note:** The script will automatically fetch the registration token using `gh` CLI. If not authenticated, run `gh auth login` first. Alternatively, you can manually set the token:
+**Note:**
+- The script automatically fetches the registration token using `gh` CLI (run `gh auth login` first if not authenticated)
+- You'll be prompted for your sudo password with clear explanations of what action requires elevated privileges
+- No need to run the entire script with sudo!
 
-```bash
-export REGISTER_GITHUB_RUNNER_TOKEN=$(gh api -X POST /orgs/${GITHUB_ORG}/actions/runners/registration-token | jq -r .token)
-sudo -E ./deploy-host.py
+**Example sudo prompts you'll see:**
+```
+[INFO   ] 🔒 Requesting sudo access for: creating runner base directory /srv/gha
+[sudo] password for user:
+
+[INFO   ] 🔒 Requesting sudo access for: installing sudoers configuration for workspace cleanup
+[INFO   ] 🔒 Requesting sudo access for: enabling systemd service gha-my-linux-cpu-small-1
+[INFO   ] 🔒 Requesting sudo access for: starting runner service gha-my-linux-cpu-small-1
 ```
 
 ---
@@ -167,13 +178,14 @@ sizes:
 ### Deploy
 
 ```bash
-sudo -E ./deploy-host.py
+./deploy-host.py
 ```
 
 > **Note:**
-> - `sudo` is required to create systemd services and write to `/srv/gha` (owned by `ci-docker`)
-> - The `-E` flag preserves environment variables (if you've manually set `REGISTER_GITHUB_RUNNER_TOKEN`)
-> - Script will automatically fetch registration token via `gh` CLI if not set
+> - You'll be prompted for your sudo password when needed (to create systemd services, directories, etc.)
+> - Script automatically fetches registration token via `gh` CLI if not already set
+> - Use `--dry-run` to preview changes without applying them
+> - Use `--verbose` for detailed logging
 
 ---
 
@@ -378,6 +390,72 @@ jobs:
 
 ---
 
+## Deployment Options
+
+The deployment script supports several flags for different use cases:
+
+### Validate Configuration
+
+Check your configuration for errors before deploying:
+
+```bash
+./deploy-host.py --validate
+```
+
+This validates:
+- Required sections are present
+- Runner names are valid (format: `{type}-{size}-[{category}]-{number}`)
+- Size definitions exist
+- No placeholder values (`your-org`)
+- No duplicate runner names
+
+### Dry-Run Mode
+
+Preview what would be deployed without making any changes:
+
+```bash
+./deploy-host.py --dry-run
+```
+
+Dry-run shows:
+- Which directories would be created
+- Which runners would be registered
+- What systemd services would be created
+- Resource limits for each runner
+
+Perfect for testing configuration changes before applying them.
+
+### Verbose Output
+
+Enable detailed logging for troubleshooting:
+
+```bash
+./deploy-host.py --verbose
+```
+
+Verbose mode shows:
+- Every command being executed
+- Command execution times
+- Environment details
+- Service file contents (in dry-run)
+
+### Combining Flags
+
+You can combine multiple flags:
+
+```bash
+# Validate with verbose output
+./deploy-host.py --validate --verbose
+
+# Dry-run with verbose output to see all details
+./deploy-host.py --dry-run --verbose
+
+# Deploy with verbose logging
+./deploy-host.py --verbose
+```
+
+---
+
 ## Managing Runners
 
 ### Adding Runners
@@ -394,7 +472,7 @@ jobs:
 
 2. Deploy (creates systemd service and registers with GitHub):
    ```bash
-   sudo -E ./deploy-host.py
+   ./deploy-host.py
    ```
 
 **What happens:**
@@ -417,7 +495,7 @@ jobs:
 
 2. Re-deploy (automatically cleans up removed runners):
    ```bash
-   sudo -E ./deploy-host.py
+   ./deploy-host.py
    ```
 
 **What happens:**
@@ -443,7 +521,7 @@ jobs:
 
 2. Re-deploy to apply changes:
    ```bash
-   sudo -E ./deploy-host.py
+   ./deploy-host.py
    ```
 
 **What happens:**
@@ -659,7 +737,7 @@ gh auth login
 gh auth status
 
 # Re-run deployment
-sudo -E ./deploy-host.py
+./deploy-host.py
 ```
 
 **Root cause:** The script needs `gh` CLI access to fetch runner registration tokens.
@@ -719,7 +797,7 @@ sudo journalctl -u gha-{prefix}-linux-{runner-name} -n 100
 sudo chown -R 1003:1003 /srv/gha
 
 # Re-deploy runner
-sudo -E ./deploy-host.py
+./deploy-host.py
 ```
 
 **Root cause:** Usually token expiration or permission issues.
@@ -742,7 +820,7 @@ sudo journalctl -u gha-{runner-name} -f
 curl -I https://github.com
 
 # 4. Re-run deployment with fresh token
-sudo -E ./deploy-host.py
+./deploy-host.py
 ```
 
 **Root cause:** Token expired, network issues, or runner failed to register.
@@ -756,7 +834,7 @@ sudo -E ./deploy-host.py
 **Solution:**
 ```bash
 # Re-deploy to install cleanup hook
-sudo -E ./deploy-host.py
+./deploy-host.py
 
 # Verify cleanup hook exists
 ls -la /srv/gha/{runner-name}/cleanup-workspace.sh
@@ -871,7 +949,7 @@ sudo rm -rf /srv/gha/*/_work/*  # CAREFUL: Deletes all workspaces
 | Permission denied on `/srv/gha` | `sudo chown -R 1003:1003 /srv/gha` |
 | Workspace permission denied (EACCES) | Re-deploy to install cleanup hook |
 | Service won't start | `sudo journalctl -u gha-<service> -n 100` |
-| Runner not in GitHub | Check token, re-run `sudo -E ./deploy-host.py` |
+| Runner not in GitHub | Check token, re-run `./deploy-host.py` |
 | GPU not accessible | Install NVIDIA drivers + Container Toolkit |
 | Docker permission denied | `sudo usermod -aG docker ci-docker && sudo systemctl restart 'gha-*'` |
 | Container image pull fails | Check registry credentials, network |
@@ -886,7 +964,7 @@ When Docker containers run as root (the default), they can create files that the
 **Solution:** The deploy script installs a pre-job cleanup hook that automatically fixes workspace permissions before each job. If you see this error, re-deploy:
 
 ```bash
-sudo -E ./deploy-host.py
+./deploy-host.py
 ```
 
 This creates:
@@ -1056,7 +1134,7 @@ sudo mv /srv/gha /srv/gha.docker-backup
 
 # 3. Deploy new setup
 export REGISTER_GITHUB_RUNNER_TOKEN=<token>
-sudo -E ./deploy-host.py
+./deploy-host.py
 
 # 4. Update workflows to use containers
 # Old:

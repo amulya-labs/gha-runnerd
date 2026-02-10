@@ -19,15 +19,21 @@ import json
 import shlex
 import shutil
 import argparse
+import time
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 try:
     import yaml
 except ImportError:
     print("ERROR: PyYAML not installed. Run: pip install pyyaml")
     sys.exit(1)
+
+
+# Global flags for logging behavior
+VERBOSE = False
+DRY_RUN = False
 
 
 class Colors:
@@ -40,33 +46,104 @@ class Colors:
     FAIL = '\033[91m'
     ENDC = '\033[0m'
     BOLD = '\033[1m'
+    DIM = '\033[2m'
 
 
 def log(msg: str, level: str = "info"):
-    """Colored logging"""
+    """Colored logging with consistent formatting"""
     colors = {
         "info": Colors.OKBLUE,
         "success": Colors.OKGREEN,
         "warning": Colors.WARNING,
         "error": Colors.FAIL,
         "header": Colors.BOLD + Colors.HEADER,
+        "debug": Colors.DIM,
     }
     color = colors.get(level, "")
-    print(f"{color}[{level.upper()}]{Colors.ENDC} {msg}")
+    prefix = level.upper()
+
+    # Format prefix for alignment
+    if level == "debug" and not VERBOSE:
+        return  # Skip debug logs unless verbose mode
+
+    print(f"{color}[{prefix:7}]{Colors.ENDC} {msg}")
 
 
-def run_cmd(cmd: List[str], check: bool = True, capture: bool = False, sudo: bool = False) -> subprocess.CompletedProcess:
-    """Run shell command with error handling"""
-    if sudo and os.geteuid() != 0:
+def log_debug(msg: str):
+    """Debug logging (only shown in verbose mode)"""
+    if VERBOSE:
+        log(msg, "debug")
+
+
+def log_dry_run(action: str, details: str = ""):
+    """Log dry-run actions"""
+    if DRY_RUN:
+        msg = f"[DRY-RUN] {action}"
+        if details:
+            msg += f": {details}"
+        log(msg, "info")
+
+
+def run_cmd(
+    cmd: List[str],
+    check: bool = True,
+    capture: bool = False,
+    sudo: bool = False,
+    dry_run_msg: Optional[str] = None,
+    sudo_reason: Optional[str] = None
+) -> Optional[subprocess.CompletedProcess]:
+    """
+    Run shell command with error handling, dry-run support, and verbose logging
+
+    Args:
+        cmd: Command and arguments as list
+        check: Raise exception on non-zero exit
+        capture: Capture stdout/stderr
+        sudo: Prepend sudo if not running as root
+        dry_run_msg: Custom message for dry-run mode
+        sudo_reason: Explanation for why sudo is needed (shown before password prompt)
+
+    Returns:
+        CompletedProcess or None (in dry-run mode)
+    """
+    need_sudo = sudo and os.geteuid() != 0
+
+    if need_sudo:
+        # Show clear message about why sudo is needed
+        reason = sudo_reason or dry_run_msg or "system operation"
+        log(f"🔒 Requesting sudo access for: {reason}", "info")
         cmd = ["sudo"] + cmd
-    
+
+    # Log command in verbose mode
+    cmd_str = ' '.join(shlex.quote(arg) for arg in cmd)
+    log_debug(f"Command: {cmd_str}")
+
+    # Handle dry-run mode
+    if DRY_RUN:
+        msg = dry_run_msg or f"Would run: {cmd_str}"
+        log_dry_run(msg)
+        # Return mock result for dry-run
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    # Execute command
+    start_time = time.time()
     try:
         if capture:
-            return subprocess.run(cmd, check=check, capture_output=True, text=True)
+            result = subprocess.run(cmd, check=check, capture_output=True, text=True)
         else:
-            return subprocess.run(cmd, check=check)
+            result = subprocess.run(cmd, check=check)
+
+        elapsed = time.time() - start_time
+        log_debug(f"Command completed in {elapsed:.2f}s")
+
+        if capture and VERBOSE and result.stdout:
+            log_debug(f"Output: {result.stdout.strip()}")
+
+        return result
+
     except subprocess.CalledProcessError as e:
-        log(f"Command failed: {' '.join(cmd)}", "error")
+        elapsed = time.time() - start_time
+        log(f"Command failed after {elapsed:.2f}s: {cmd_str}", "error")
         if hasattr(e, 'stderr') and e.stderr:
             log(f"STDERR: {e.stderr}", "error")
         if hasattr(e, 'stdout') and e.stdout:
@@ -441,31 +518,64 @@ class HostDeployer:
         uid = self.config['host']['docker_user_uid']
         gid = self.config['host']['docker_user_gid']
 
+        log_debug(f"Base directory: {base_path}")
+        log_debug(f"Owner UID:GID: {uid}:{gid}")
+
         # Ensure base directory exists
-        if not base_path.exists():
+        if not base_path.exists() or DRY_RUN:
             log(f"Creating {base}...", "info")
-            run_cmd(["mkdir", "-p", str(base_path)], sudo=True)
+            run_cmd(
+                ["mkdir", "-p", str(base_path)],
+                sudo=True,
+                sudo_reason=f"creating runner base directory {base_path}",
+                dry_run_msg=f"Create base directory {base_path}"
+            )
 
         # Create individual runner directories
         for runner in self.runners:
             path = Path(runner.runner_path)
-            if not path.exists():
+            if not path.exists() or DRY_RUN:
                 log(f"Creating {path}...", "info")
-                run_cmd(["mkdir", "-p", str(path)], sudo=True)
+                run_cmd(
+                    ["mkdir", "-p", str(path)],
+                    sudo=True,
+                    sudo_reason=f"creating runner directory {path}",
+                    dry_run_msg=f"Create runner directory {path}"
+                )
 
         # Set ownership
         log(f"Setting ownership {uid}:{gid} on {base}...", "info")
-        run_cmd(["chown", "-R", f"{uid}:{gid}", str(base_path)], sudo=True)
+        run_cmd(
+            ["chown", "-R", f"{uid}:{gid}", str(base_path)],
+            sudo=True,
+            sudo_reason=f"setting ownership on {base_path}",
+            dry_run_msg=f"Set ownership {uid}:{gid} on {base_path}"
+        )
 
         # Create shared cache directory for corca-ai/local-cache
         # Used as a general cache across ecosystems (e.g. Poetry, npm, Cargo)
         cache_dir = Path("/srv/gha-cache")
-        if not cache_dir.exists():
+        if not cache_dir.exists() or DRY_RUN:
             log(f"Creating shared cache directory {cache_dir}...", "info")
-            run_cmd(["mkdir", "-p", str(cache_dir)], sudo=True)
+            run_cmd(
+                ["mkdir", "-p", str(cache_dir)],
+                sudo=True,
+                sudo_reason=f"creating shared cache directory {cache_dir}",
+                dry_run_msg=f"Create cache directory {cache_dir}"
+            )
         # Always ensure correct ownership/permissions (fix if directory exists with wrong perms)
-        run_cmd(["chown", f"{uid}:{gid}", str(cache_dir)], sudo=True)
-        run_cmd(["chmod", "755", str(cache_dir)], sudo=True)
+        run_cmd(
+            ["chown", f"{uid}:{gid}", str(cache_dir)],
+            sudo=True,
+            sudo_reason=f"setting cache directory ownership",
+            dry_run_msg=f"Set cache directory ownership {uid}:{gid}"
+        )
+        run_cmd(
+            ["chmod", "755", str(cache_dir)],
+            sudo=True,
+            sudo_reason=f"setting cache directory permissions",
+            dry_run_msg=f"Set cache directory permissions 755"
+        )
         log("Shared cache directory ready", "success")
 
         log("Directories ready", "success")
@@ -481,66 +591,86 @@ class HostDeployer:
         """Download and extract GitHub Actions runner binary"""
         runner_path = Path(runner.runner_path)
         config_script = runner_path / "config.sh"
-        
+
         # Check if runner is already installed
-        if config_script.exists():
+        if config_script.exists() and not DRY_RUN:
             log(f"Runner binary already installed at {runner_path}", "info")
+            log_debug(f"Config script found: {config_script}")
             return
-        
+
         log(f"Installing runner binary for {runner.registered_name}...", "info")
-        
+
         version = self.config['runner']['version']
         arch = self.config['runner']['arch']
         tarball_url = f"https://github.com/actions/runner/releases/download/v{version}/actions-runner-{arch}-{version}.tar.gz"
         tarball_path = runner_path / "runner.tar.gz"
-        
+
+        log_debug(f"Runner version: {version}")
+        log_debug(f"Architecture: {arch}")
+        log_debug(f"Download URL: {tarball_url}")
+
         # Download runner tarball
         log(f"Downloading runner v{version}...", "info")
-        run_cmd([
-            "curl", "-fsSL", "-o", str(tarball_path), tarball_url
-        ])
-        
+        run_cmd(
+            ["curl", "-fsSL", "-o", str(tarball_path), tarball_url],
+            dry_run_msg=f"Download runner v{version} from GitHub"
+        )
+
         # Extract tarball
         log("Extracting runner...", "info")
-        run_cmd([
-            "tar", "xzf", str(tarball_path), "-C", str(runner_path)
-        ])
-        
+        run_cmd(
+            ["tar", "xzf", str(tarball_path), "-C", str(runner_path)],
+            dry_run_msg=f"Extract runner to {runner_path}"
+        )
+
         # Remove tarball
-        tarball_path.unlink()
-        
+        if not DRY_RUN:
+            tarball_path.unlink()
+        else:
+            log_dry_run(f"Remove tarball {tarball_path}")
+
         # Fix ownership
         uid = self.config['host']['docker_user_uid']
         gid = self.config['host']['docker_user_gid']
-        run_cmd(["chown", "-R", f"{uid}:{gid}", str(runner_path)], sudo=True)
-        
+        run_cmd(
+            ["chown", "-R", f"{uid}:{gid}", str(runner_path)],
+            sudo=True,
+            sudo_reason=f"setting runner binary ownership to ci-docker user",
+            dry_run_msg=f"Set runner directory ownership {uid}:{gid}"
+        )
+
         log(f"Runner binary installed at {runner_path}", "success")
 
     def register_runner(self, runner: RunnerConfig):
         """Register or reconfigure runner with GitHub"""
         token = os.environ.get("REGISTER_GITHUB_RUNNER_TOKEN")
-        if not token:
+        if not token and not DRY_RUN:
             log("REGISTER_GITHUB_RUNNER_TOKEN not set - skipping registration", "warning")
             log(f"Runner {runner.registered_name} must already be registered", "warning")
             return
-        
+
         log(f"Registering {runner.registered_name}...", "info")
-        
+
         runner_path = Path(runner.runner_path)
         org = self.config['github']['org']
         runner_url = f"https://github.com/{org}"
-        
+
+        log_debug(f"Runner URL: {runner_url}")
+        log_debug(f"Runner name: {runner.registered_name}")
+        log_debug(f"Labels: {runner.labels}")
+
         # Check if runner needs (re)configuration
         runner_file = runner_path / ".runner"
         credentials_file = runner_path / ".credentials"
         labels_file = runner_path / ".labels"
-        
+
         need_config = True
-        
-        if runner_file.exists() and credentials_file.exists():
+
+        if not DRY_RUN and runner_file.exists() and credentials_file.exists():
             # Check if labels match
             if labels_file.exists():
                 current_labels = labels_file.read_text().strip()
+                log_debug(f"Current labels: {current_labels}")
                 if current_labels == runner.labels:
                     log(f"Runner {runner.registered_name} already configured with correct labels", "info")
                     need_config = False
@@ -549,40 +679,54 @@ class HostDeployer:
                     # Remove existing configuration
                     self._unconfigure_runner(runner, token)
         
-        if need_config:
+        if need_config or DRY_RUN:
             # Run config.sh
             config_cmd = [
                 str(runner_path / "config.sh"),
                 "--url", runner_url,
-                "--token", token,
+                "--token", "***TOKEN***" if DRY_RUN else token,
                 "--name", runner.registered_name,
                 "--labels", runner.labels,
                 "--unattended",
                 "--replace"
             ]
-            
+
             # Run as the runner user
             uid = self.config['host']['docker_user_uid']
             gid = self.config['host']['docker_user_gid']
-            
+
+            log_debug(f"Running config.sh as UID {uid}, GID {gid}")
+
             # Use sudo -u to run as specific user
-            try:
-                run_cmd(
-                    ["sudo", "-u", f"#{uid}", "-g", f"#{gid}",
-                     "bash", "-c", f"cd {shlex.quote(str(runner_path))} && {' '.join(shlex.quote(arg) for arg in config_cmd)}"]
-                )
-            except subprocess.CalledProcessError as e:
-                log(f"Failed to register runner {runner.registered_name}", "error")
-                log("This usually means:", "error")
-                log("  • Registration token is invalid or expired", "error")
-                log("  • Token was already used (tokens are single-use)", "error")
-                log("  • Network connectivity issues", "error")
-                log("\nTry fetching a fresh token and re-running", "error")
-                raise
+            if DRY_RUN:
+                log_dry_run(f"Register runner {runner.registered_name} with GitHub")
+                log_dry_run(f"Labels: {runner.labels}")
+            else:
+                try:
+                    run_cmd(
+                        ["sudo", "-u", f"#{uid}", "-g", f"#{gid}",
+                         "bash", "-c", f"cd {shlex.quote(str(runner_path))} && {' '.join(shlex.quote(arg) for arg in config_cmd)}"]
+                    )
+                except subprocess.CalledProcessError as e:
+                    log(f"Failed to register runner {runner.registered_name}", "error")
+                    log("This usually means:", "error")
+                    log("  • Registration token is invalid or expired", "error")
+                    log("  • Token was already used (tokens are single-use)", "error")
+                    log("  • Network connectivity issues", "error")
+                    log("\nTry fetching a fresh token and re-running", "error")
+                    raise
 
             # Save labels
-            labels_file.write_text(runner.labels)
-            run_cmd(["chown", f"{uid}:{gid}", str(labels_file)], sudo=True)
+            if DRY_RUN:
+                log_dry_run(f"Save labels to {labels_file}")
+            else:
+                labels_file.write_text(runner.labels)
+                run_cmd(
+                    ["chown", f"{uid}:{gid}", str(labels_file)],
+                    sudo=True,
+                    sudo_reason=f"setting labels file ownership",
+                    dry_run_msg=f"Set labels file ownership"
+                )
 
             log(f"Registered {runner.registered_name}", "success")
 
@@ -644,9 +788,21 @@ fi
         temp_path.write_text(hook_content)
         temp_path.chmod(0o755)
 
-        run_cmd(["cp", str(temp_path), str(hook_path)], sudo=True)
-        run_cmd(["chown", f"{uid}:{gid}", str(hook_path)], sudo=True)
-        run_cmd(["chmod", "755", str(hook_path)], sudo=True)
+        run_cmd(
+            ["cp", str(temp_path), str(hook_path)],
+            sudo=True,
+            sudo_reason=f"installing cleanup hook script"
+        )
+        run_cmd(
+            ["chown", f"{uid}:{gid}", str(hook_path)],
+            sudo=True,
+            sudo_reason=f"setting cleanup hook ownership"
+        )
+        run_cmd(
+            ["chmod", "755", str(hook_path)],
+            sudo=True,
+            sudo_reason=f"setting cleanup hook permissions"
+        )
         temp_path.unlink()
 
         log(f"Cleanup hook created at {hook_path}", "success")
@@ -674,15 +830,28 @@ Defaults:#{uid} !requiretty
 
         # Validate sudoers syntax before installing
         try:
-            run_cmd(["visudo", "-c", "-f", str(temp_path)], sudo=True, capture=True)
+            run_cmd(
+                ["visudo", "-c", "-f", str(temp_path)],
+                sudo=True,
+                sudo_reason="validating sudoers configuration",
+                capture=True
+            )
         except subprocess.CalledProcessError:
             temp_path.unlink()
             log("Sudoers file validation failed!", "error")
             raise
 
         # Move into place with sudo
-        run_cmd(["cp", str(temp_path), str(sudoers_path)], sudo=True)
-        run_cmd(["chmod", "440", str(sudoers_path)], sudo=True)
+        run_cmd(
+            ["cp", str(temp_path), str(sudoers_path)],
+            sudo=True,
+            sudo_reason="installing sudoers configuration for workspace cleanup"
+        )
+        run_cmd(
+            ["chmod", "440", str(sudoers_path)],
+            sudo=True,
+            sudo_reason="setting sudoers file permissions"
+        )
         temp_path.unlink()
         log("Sudoers configured for workspace cleanup", "success")
 
@@ -698,6 +867,9 @@ Defaults:#{uid} !requiretty
         runner_path = runner.runner_path
         size_cfg = runner.size_config
         hook_path = f"{runner_path}/cleanup-workspace.sh"
+
+        log_debug(f"Service name: {service_name}")
+        log_debug(f"Service path: {service_path}")
 
         # Build service file content
         service_content = f"""[Unit]
@@ -721,36 +893,63 @@ Environment="ACTIONS_RUNNER_HOOK_JOB_STARTED={hook_path}"
         if size_cfg.get('cpus'):
             cpu_quota = int(float(size_cfg['cpus']) * 100)
             service_content += f"CPUQuota={cpu_quota}%\n"
+            log_debug(f"CPU limit: {size_cfg['cpus']} cores ({cpu_quota}%)")
 
         if size_cfg.get('mem_limit'):
             service_content += f"MemoryMax={size_cfg['mem_limit']}\n"
+            log_debug(f"Memory limit: {size_cfg['mem_limit']}")
 
         if size_cfg.get('pids_limit'):
             service_content += f"TasksMax={size_cfg['pids_limit']}\n"
+            log_debug(f"PIDs limit: {size_cfg['pids_limit']}")
 
         # Add GPU environment variables if needed
         if runner.parsed['gpu']:
             service_content += "Environment=\"NVIDIA_VISIBLE_DEVICES=all\"\n"
             service_content += "Environment=\"NVIDIA_DRIVER_CAPABILITIES=compute,utility\"\n"
+            log_debug("GPU support enabled")
 
         service_content += """
 [Install]
 WantedBy=multi-user.target
 """
-        
+
         # Write service file
-        service_path.write_text(service_content)
-        
+        if DRY_RUN:
+            log_dry_run(f"Write systemd service file to {service_path}")
+            if VERBOSE:
+                log_debug("Service file content:")
+                for line in service_content.split('\n'):
+                    if line.strip():
+                        log_debug(f"  {line}")
+        else:
+            service_path.write_text(service_content)
+
         # Reload systemd, enable and start service
         log("Reloading systemd daemon...", "info")
-        run_cmd(["systemctl", "daemon-reload"], sudo=True)
-        
+        run_cmd(
+            ["systemctl", "daemon-reload"],
+            sudo=True,
+            sudo_reason="reloading systemd after service file changes",
+            dry_run_msg="Reload systemd daemon"
+        )
+
         log(f"Enabling service {service_name}...", "info")
-        run_cmd(["systemctl", "enable", service_name], sudo=True)
-        
+        run_cmd(
+            ["systemctl", "enable", service_name],
+            sudo=True,
+            sudo_reason=f"enabling systemd service {service_name}",
+            dry_run_msg=f"Enable service {service_name}"
+        )
+
         log(f"Starting service {service_name}...", "info")
-        run_cmd(["systemctl", "restart", service_name], sudo=True)
-        
+        run_cmd(
+            ["systemctl", "restart", service_name],
+            sudo=True,
+            sudo_reason=f"starting runner service {service_name}",
+            dry_run_msg=f"Start service {service_name}"
+        )
+
         log(f"Service {service_name} created and started", "success")
 
     def sync_labels_via_api(self):
@@ -814,24 +1013,36 @@ WantedBy=multi-user.target
     def print_summary(self):
         """Print deployment summary"""
         log("\n" + "="*60, "header")
-        log("DEPLOYMENT COMPLETE", "header")
+        if DRY_RUN:
+            log("DRY-RUN COMPLETE - No changes were made", "header")
+        else:
+            log("DEPLOYMENT COMPLETE", "header")
         log("="*60, "header")
 
         org = self.config['github']['org']
         settings_url = f"https://github.com/organizations/{org}/settings/actions/runners"
 
-        log(f"\nRunners: {settings_url}", "info")
-        log(f"\nDeployed {len(self.runners)} runner(s):", "info")
+        if DRY_RUN:
+            log(f"\nWould deploy {len(self.runners)} runner(s):", "info")
+        else:
+            log(f"\nRunners: {settings_url}", "info")
+            log(f"\nDeployed {len(self.runners)} runner(s):", "info")
 
         for runner in self.runners:
             log(f"  • {runner.registered_name} ({runner.parsed['type']}, {runner.parsed['size']})", "info")
             log(f"    Service: {runner.service_name}.service", "info")
             log(f"    Path: {runner.runner_path}", "info")
+            if runner.size_config.get('cpus'):
+                log(f"    Resources: {runner.size_config['cpus']} CPUs, {runner.size_config.get('mem_limit', 'unlimited')} RAM", "info")
 
-        log("\nManagement commands:", "info")
-        log("  • Check status: sudo systemctl status gha-*", "info")
-        log("  • View logs: sudo journalctl -u gha-* -f", "info")
-        log("  • Restart runner: sudo systemctl restart gha-<name>", "info")
+        if DRY_RUN:
+            log("\n💡 This was a dry-run. To deploy for real, run without --dry-run:", "info")
+            log("   sudo -E ./deploy-host.py", "info")
+        else:
+            log("\nManagement commands:", "info")
+            log("  • Check status: sudo systemctl status gha-*", "info")
+            log("  • View logs: sudo journalctl -u gha-* -f", "info")
+            log("  • Restart runner: sudo systemctl restart gha-<name>", "info")
 
         log("\n" + "="*60 + "\n", "header")
 
@@ -874,24 +1085,46 @@ WantedBy=multi-user.target
 
                 # Stop and disable service
                 log(f"Stopping service {service_name}...", "info")
-                run_cmd(["systemctl", "stop", service_name], sudo=True, check=False)
+                run_cmd(
+                    ["systemctl", "stop", service_name],
+                    sudo=True,
+                    sudo_reason=f"stopping removed runner service",
+                    check=False
+                )
 
                 log(f"Disabling service {service_name}...", "info")
-                run_cmd(["systemctl", "disable", service_name], sudo=True, check=False)
+                run_cmd(
+                    ["systemctl", "disable", service_name],
+                    sudo=True,
+                    sudo_reason=f"disabling removed runner service",
+                    check=False
+                )
 
                 # Remove service file
                 service_path = Path(f"/etc/systemd/system/{service_name}")
                 if service_path.exists():
                     log(f"Removing service file {service_path}...", "info")
-                    run_cmd(["rm", str(service_path)], sudo=True)
+                    run_cmd(
+                        ["rm", str(service_path)],
+                        sudo=True,
+                        sudo_reason=f"removing systemd service file"
+                    )
 
                 # Reload systemd
-                run_cmd(["systemctl", "daemon-reload"], sudo=True)
+                run_cmd(
+                    ["systemctl", "daemon-reload"],
+                    sudo=True,
+                    sudo_reason="reloading systemd after removing service"
+                )
 
                 # Remove runner directory
                 if runner_path.exists():
                     log(f"Removing runner directory {runner_path}...", "info")
-                    run_cmd(["rm", "-rf", str(runner_path)], sudo=True)
+                    run_cmd(
+                        ["rm", "-rf", str(runner_path)],
+                        sudo=True,
+                        sudo_reason=f"removing runner directory {runner_path}"
+                    )
 
                 log(f"Runner {runner_name} removed successfully", "success")
                 removed_count += 1
@@ -943,11 +1176,25 @@ Examples:
   # Validate configuration without deploying
   ./deploy-host.py --validate
 
-  # Deploy runners
-  sudo -E ./deploy-host.py
+  # Preview what would be deployed (dry-run)
+  ./deploy-host.py --dry-run
+
+  # Deploy runners (will prompt for sudo password when needed)
+  ./deploy-host.py
+
+  # Deploy with verbose output
+  ./deploy-host.py --verbose
 
   # Deploy with custom config file
-  sudo -E ./deploy-host.py --config custom-config.yml
+  ./deploy-host.py --config custom-config.yml
+
+  # Combine flags
+  ./deploy-host.py --validate --verbose
+  ./deploy-host.py --dry-run --verbose
+
+Note: The script will prompt for sudo password when needed for system operations
+      (creating directories, systemd services, etc.). You do NOT need to run
+      the entire script with sudo.
         """
     )
     parser.add_argument(
@@ -956,12 +1203,32 @@ Examples:
         help='Validate configuration without deploying'
     )
     parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Preview deployment actions without executing them'
+    )
+    parser.add_argument(
+        '--verbose', '-v',
+        action='store_true',
+        help='Enable verbose output with detailed logging'
+    )
+    parser.add_argument(
         '--config',
         default='config.yml',
         help='Path to configuration file (default: config.yml)'
     )
 
     args = parser.parse_args()
+
+    # Set global flags
+    global VERBOSE, DRY_RUN
+    VERBOSE = args.verbose
+    DRY_RUN = args.dry_run
+
+    if VERBOSE:
+        log("Verbose mode enabled", "debug")
+    if DRY_RUN:
+        log("Dry-run mode enabled - no changes will be made", "info")
 
     try:
         deployer = HostDeployer(config_path=args.config)
@@ -976,14 +1243,20 @@ Examples:
                 log("\n❌ Configuration has errors. Fix them before deploying.", "error")
                 sys.exit(1)
         else:
-            # Normal deployment mode
+            # Normal deployment mode (or dry-run)
             # Validate first before deploying
             if not deployer.validate_config():
                 log("\n❌ Configuration validation failed. Aborting deployment.", "error")
                 log("Run './deploy-host.py --validate' to see detailed errors.", "info")
                 sys.exit(1)
 
-            log("\n" + "="*60, "header")
+            if DRY_RUN:
+                log("\n" + "="*60, "header")
+                log("DRY-RUN MODE - Preview of deployment actions", "header")
+                log("="*60 + "\n", "header")
+            else:
+                log("\n" + "="*60, "header")
+
             deployer.deploy()
 
     except KeyboardInterrupt:
