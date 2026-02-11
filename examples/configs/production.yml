@@ -1,0 +1,76 @@
+# Production configuration with multiple runner types
+# Suitable for organizations with diverse workload requirements
+
+github:
+  org: "your-org"
+  prefix: "prod"
+
+host:
+  label: "prod-runners"
+  runner_base: "/srv/gha"
+  docker_socket: "/var/run/docker.sock"
+  docker_user_uid: 1003
+  docker_user_gid: 1003
+
+cache:
+  base_dir: "/srv/gha-cache"
+  permissions: "755"
+
+runners:
+  # Lightweight tasks (linting, quick checks)
+  - "cpu-xs-1"
+  - "cpu-xs-2"
+
+  # Standard workloads (tests, small builds)
+  - "cpu-small-1"
+  - "cpu-small-2"
+  - "cpu-small-3"
+
+  # Medium workloads (integration tests, builds)
+  - "cpu-medium-1"
+  - "cpu-medium-2"
+
+  # Docker builds (no container wrapping)
+  - "cpu-medium-docker-1"
+
+  # Heavy workloads (large builds, compilation)
+  - "cpu-large-1"
+
+  # GPU workloads (ML training, testing)
+  # - "gpu-max-1"
+
+sizes:
+  xs:
+    cpus: 1.0
+    mem_limit: "2g"
+    pids_limit: 1024
+  small:
+    cpus: 2.0
+    mem_limit: "4g"
+    pids_limit: 2048
+  medium:
+    cpus: 6.0
+    mem_limit: "16g"
+    pids_limit: 4096
+  large:
+    cpus: 12.0
+    mem_limit: "32g"
+    pids_limit: 8192
+  max:
+    cpus: null  # No limits
+    mem_limit: null
+    pids_limit: null
+
+runner:
+  version: "2.329.0"
+  arch: "linux-x64"
+
+systemd:
+  restart_policy: "always"
+  restart_sec: 10
+
+sudoers:
+  path: "/etc/sudoers.d/gha-runner-cleanup"
+
+github_api:
+  enforce_labels: true

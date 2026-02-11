@@ -1,0 +1,77 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! Please fill out the form below.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear description of what the bug is
+      placeholder: What happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+      placeholder: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior
+      placeholder: |
+        1. Run command '...'
+        2. See error '...'
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: Your config.yml (sanitize any sensitive data)
+      render: yaml
+      placeholder: |
+        github:
+          org: "my-org"
+          prefix: "prod"
+        ...
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant log output
+      render: shell
+      placeholder: Paste log output here
+
+  - type: input
+    id: version
+    attributes:
+      label: Runner Version
+      description: GitHub Actions runner version from config
+      placeholder: "2.329.0"
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating System
+      description: OS and version
+      placeholder: "Ubuntu 22.04"
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Any other context about the problem

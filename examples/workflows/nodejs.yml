@@ -1,0 +1,84 @@
+name: Node.js CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # Linting on xs runner
+  lint:
+    runs-on: [self-hosted, linux, cpu, xs, generic]
+    container:
+      image: node:20-slim
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache node_modules
+        uses: corca-ai/local-cache@v2
+        with:
+          key: node-modules-${{ hashFiles('package-lock.json') }}
+          path: node_modules
+          base: /srv/gha-cache
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+  # Unit tests on small runner
+  test:
+    runs-on: [self-hosted, linux, cpu, small, generic]
+    container:
+      image: node:20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache node_modules
+        uses: corca-ai/local-cache@v2
+        with:
+          key: node-modules-${{ hashFiles('package-lock.json') }}
+          path: node_modules
+          base: /srv/gha-cache
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+  # Build on medium runner
+  build:
+    runs-on: [self-hosted, linux, cpu, medium, generic]
+    container:
+      image: node:20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache node_modules
+        uses: corca-ai/local-cache@v2
+        with:
+          key: node-modules-${{ hashFiles('package-lock.json') }}
+          path: node_modules
+          base: /srv/gha-cache
+
+      - name: Cache build output
+        uses: corca-ai/local-cache@v2
+        with:
+          key: build-${{ github.sha }}
+          path: dist
+          base: /srv/gha-cache
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

@@ -1,0 +1,43 @@
+name: Docker Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # Build on specialized docker runner (no container wrapping)
+  build:
+    runs-on: [self-hosted, linux, cpu, medium, docker]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: corca-ai/local-cache@v2
+        with:
+          key: docker-${{ github.sha }}
+          path: /tmp/.buildx-cache
+          base: /srv/gha-cache
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: myapp:${{ github.sha }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+
+      # Rotate cache to prevent it from growing indefinitely
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+      - name: Test image
+        run: |
+          docker run --rm myapp:${{ github.sha }} --version
