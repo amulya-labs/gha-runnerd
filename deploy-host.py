@@ -49,7 +49,7 @@ class Colors:
     DIM = '\033[2m'
 
 
-def log(msg: str, level: str = "info"):
+def log(msg: str, level: str = "info", newline: bool = True):
     """Colored logging with consistent formatting"""
     colors = {
         "info": Colors.OKBLUE,
@@ -66,7 +66,8 @@ def log(msg: str, level: str = "info"):
     if level == "debug" and not VERBOSE:
         return  # Skip debug logs unless verbose mode
 
-    print(f"{color}[{prefix:7}]{Colors.ENDC} {msg}")
+    end_char = '\n' if newline else ''
+    print(f"{color}[{prefix:7}]{Colors.ENDC} {msg}", end=end_char)
 
 
 def log_debug(msg: str):
@@ -1153,6 +1154,275 @@ WantedBy=multi-user.target
         else:
             log(f"\nRemoved {removed_count} runner(s)", "success")
 
+    def list_runners(self):
+        """List all deployed runners with their status"""
+        log("Listing deployed runners...\n", "info")
+        
+        prefix = self.config['github']['prefix']
+        service_pattern = f"gha-{prefix}-linux-"
+        
+        # Get list of all services matching our pattern
+        result = run_cmd(
+            ["systemctl", "list-units", "--all", "--no-legend", f"{service_pattern}*"],
+            sudo=True,
+            capture=True,
+            check=False
+        )
+        
+        runners_found = []
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+                
+            service_full = parts[0]
+            if not service_full.startswith(service_pattern):
+                continue
+            
+            # Extract runner name
+            runner_name = service_full.replace(service_pattern, "").replace(".service", "")
+            
+            # Get service status
+            status_result = run_cmd(
+                ["systemctl", "is-active", service_full],
+                sudo=True,
+                capture=True,
+                check=False
+            )
+            status = status_result.stdout.strip()
+            
+            # Get runner path
+            runner_path = Path(f"{self.config['host']['runner_base']}/{prefix}-linux-{runner_name}")
+            exists = runner_path.exists()
+            
+            runners_found.append({
+                'name': runner_name,
+                'service': service_full,
+                'status': status,
+                'path': runner_path,
+                'exists': exists
+            })
+        
+        if not runners_found:
+            log("No runners found", "warning")
+            return
+        
+        # Print table header
+        log(f"{'Runner Name':<30} {'Service':<40} {'Status':<15} {'Path Exists':<12}", "header")
+        log("-" * 100, "header")
+        
+        for runner in runners_found:
+            status_color = "success" if runner['status'] == "active" else "warning"
+            exists_str = "✓" if runner['exists'] else "✗"
+            
+            print(f"{runner['name']:<30} {runner['service']:<40} ", end="")
+            log(f"{runner['status']:<15}", status_color, newline=False)
+            print(f" {exists_str:<12}")
+        
+        log(f"\nTotal runners: {len(runners_found)}", "info")
+
+    def remove_runner(self, runner_name: str):
+        """Remove a specific runner by name"""
+        log(f"Removing runner: {runner_name}\n", "warning")
+        
+        prefix = self.config['github']['prefix']
+        service_name = f"gha-{prefix}-linux-{runner_name}.service"
+        runner_path = Path(f"{self.config['host']['runner_base']}/{prefix}-linux-{runner_name}")
+        
+        # Check if service exists
+        check_result = run_cmd(
+            ["systemctl", "list-units", "--all", "--no-legend", service_name],
+            sudo=True,
+            capture=True,
+            check=False
+        )
+        
+        if not check_result.stdout.strip():
+            log(f"Runner '{runner_name}' not found", "error")
+            return False
+        
+        # Stop service
+        log(f"Stopping service {service_name}...", "info")
+        run_cmd(
+            ["systemctl", "stop", service_name],
+            sudo=True,
+            sudo_reason=f"stopping runner service {service_name}",
+            check=False
+        )
+        
+        # Disable service
+        log(f"Disabling service {service_name}...", "info")
+        run_cmd(
+            ["systemctl", "disable", service_name],
+            sudo=True,
+            sudo_reason=f"disabling runner service {service_name}",
+            check=False
+        )
+        
+        # Remove service file
+        service_path = Path(f"/etc/systemd/system/{service_name}")
+        if service_path.exists():
+            log(f"Removing service file {service_path}...", "info")
+            run_cmd(
+                ["rm", str(service_path)],
+                sudo=True,
+                sudo_reason=f"removing systemd service file"
+            )
+        
+        # Reload systemd
+        run_cmd(
+            ["systemctl", "daemon-reload"],
+            sudo=True,
+            sudo_reason="reloading systemd after removing service"
+        )
+        
+        # Remove runner directory
+        if runner_path.exists():
+            log(f"Removing runner directory {runner_path}...", "info")
+            run_cmd(
+                ["rm", "-rf", str(runner_path)],
+                sudo=True,
+                sudo_reason=f"removing runner directory {runner_path}"
+            )
+        
+        log(f"\n✅ Runner '{runner_name}' removed successfully", "success")
+        return True
+
+    def upgrade_runners(self):
+        """Upgrade runner binaries for all deployed runners"""
+        log("Upgrading runner binaries...\n", "info")
+        
+        prefix = self.config['github']['prefix']
+        service_pattern = f"gha-{prefix}-linux-"
+        
+        # Get list of all services
+        result = run_cmd(
+            ["systemctl", "list-units", "--all", "--no-legend", f"{service_pattern}*"],
+            sudo=True,
+            capture=True,
+            check=False
+        )
+        
+        runners_to_upgrade = []
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            
+            parts = line.split()
+            if len(parts) < 1:
+                continue
+                
+            service_full = parts[0]
+            if not service_full.startswith(service_pattern):
+                continue
+            
+            # Extract runner name
+            runner_name = service_full.replace(service_pattern, "").replace(".service", "")
+            runner_path = Path(f"{self.config['host']['runner_base']}/{prefix}-linux-{runner_name}")
+            
+            if runner_path.exists():
+                runners_to_upgrade.append({
+                    'name': runner_name,
+                    'service': service_full,
+                    'path': runner_path
+                })
+        
+        if not runners_to_upgrade:
+            log("No runners found to upgrade", "warning")
+            return
+        
+        log(f"Found {len(runners_to_upgrade)} runner(s) to upgrade", "info")
+        
+        # Get runner version from config
+        runner_version = self.config['runner']['version']
+        runner_url = f"https://github.com/actions/runner/releases/download/v{runner_version}/actions-runner-linux-x64-{runner_version}.tar.gz"
+        runner_tarball = f"/tmp/actions-runner-{runner_version}.tar.gz"
+        
+        log(f"\nDownloading runner version {runner_version}...", "info")
+        if not Path(runner_tarball).exists():
+            run_cmd(
+                ["curl", "-L", "-o", runner_tarball, runner_url],
+                check=True
+            )
+        else:
+            log(f"Using cached runner tarball: {runner_tarball}", "info")
+        
+        # Upgrade each runner
+        upgraded_count = 0
+        for runner_info in runners_to_upgrade:
+            log(f"\n>>> Upgrading runner: {runner_info['name']}", "header")
+            
+            # Stop service
+            log(f"Stopping service {runner_info['service']}...", "info")
+            run_cmd(
+                ["systemctl", "stop", runner_info['service']],
+                sudo=True,
+                sudo_reason=f"stopping runner for upgrade",
+                check=False
+            )
+            
+            # Backup current version (just the binaries, not _work)
+            backup_marker = runner_info['path'] / ".backup-done"
+            if not backup_marker.exists():
+                log(f"Creating backup of runner binaries...", "info")
+                run_cmd(
+                    ["tar", "-czf", f"{runner_info['path']}.backup.tar.gz", 
+                     "-C", str(runner_info['path']), 
+                     "--exclude=_work", "--exclude=.runner", 
+                     "."],
+                    sudo=True,
+                    sudo_reason="backing up runner before upgrade"
+                )
+                backup_marker.touch()
+            
+            # Extract new binaries (preserve _work and .runner)
+            log(f"Extracting new runner binaries...", "info")
+            run_cmd(
+                ["tar", "-xzf", runner_tarball, 
+                 "-C", str(runner_info['path']),
+                 "--exclude=_work", "--exclude=.runner"],
+                sudo=True,
+                sudo_reason="extracting new runner binaries"
+            )
+            
+            # Fix permissions
+            runner_uid = self.config['host'].get('docker_user_uid', 1003)
+            runner_gid = self.config['host'].get('docker_user_gid', 1003)
+            run_cmd(
+                ["chown", "-R", f"{runner_uid}:{runner_gid}", str(runner_info['path'])],
+                sudo=True,
+                sudo_reason="fixing permissions after upgrade"
+            )
+            
+            # Start service
+            log(f"Starting service {runner_info['service']}...", "info")
+            run_cmd(
+                ["systemctl", "start", runner_info['service']],
+                sudo=True,
+                sudo_reason=f"starting upgraded runner",
+                check=False
+            )
+            
+            # Verify it started
+            time.sleep(2)
+            status_result = run_cmd(
+                ["systemctl", "is-active", runner_info['service']],
+                sudo=True,
+                capture=True,
+                check=False
+            )
+            
+            if status_result.stdout.strip() == "active":
+                log(f"✅ Runner '{runner_info['name']}' upgraded successfully", "success")
+                upgraded_count += 1
+            else:
+                log(f"⚠️  Runner '{runner_info['name']}' upgraded but failed to start", "warning")
+        
+        log(f"\n✅ Upgraded {upgraded_count}/{len(runners_to_upgrade)} runner(s)", "success")
+
     def deploy(self):
         """Main deployment workflow"""
         log("Starting GitHub Actions Host-Based Runner Deployment", "header")
@@ -1201,6 +1471,15 @@ Examples:
   # Deploy runners (will prompt for sudo password when needed)
   ./deploy-host.py
 
+  # List all deployed runners
+  ./deploy-host.py --list
+
+  # Remove a specific runner
+  ./deploy-host.py --remove cpu-small-1
+
+  # Upgrade all runner binaries
+  ./deploy-host.py --upgrade
+
   # Deploy with verbose output
   ./deploy-host.py --verbose
 
@@ -1225,6 +1504,21 @@ Note: The script will prompt for sudo password when needed for system operations
         '--dry-run',
         action='store_true',
         help='Preview deployment actions without executing them'
+    )
+    parser.add_argument(
+        '--list',
+        action='store_true',
+        help='List all deployed runners with their status'
+    )
+    parser.add_argument(
+        '--remove',
+        metavar='RUNNER_NAME',
+        help='Remove a specific runner (e.g., cpu-small-1)'
+    )
+    parser.add_argument(
+        '--upgrade',
+        action='store_true',
+        help='Upgrade runner binaries for all deployed runners'
     )
     parser.add_argument(
         '--verbose', '-v',
@@ -1252,6 +1546,24 @@ Note: The script will prompt for sudo password when needed for system operations
     try:
         deployer = HostDeployer(config_path=args.config)
 
+        # Handle --list command
+        if args.list:
+            deployer.list_runners()
+            sys.exit(0)
+
+        # Handle --remove command
+        if args.remove:
+            if deployer.remove_runner(args.remove):
+                sys.exit(0)
+            else:
+                sys.exit(1)
+
+        # Handle --upgrade command
+        if args.upgrade:
+            deployer.upgrade_runners()
+            sys.exit(0)
+
+        # Handle --validate command
         if args.validate:
             # Validation mode - check config and exit
             log("Running in validation mode (no deployment will occur)\n", "info")
