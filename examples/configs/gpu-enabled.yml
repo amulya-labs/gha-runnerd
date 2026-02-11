@@ -1,0 +1,56 @@
+# Configuration with GPU support
+# For ML/AI workloads requiring GPU acceleration
+
+github:
+  org: "your-org"
+  prefix: "ml"
+
+host:
+  label: "ml-server"
+  runner_base: "/srv/gha"
+  docker_socket: "/var/run/docker.sock"
+  docker_user_uid: 1003
+  docker_user_gid: 1003
+
+cache:
+  base_dir: "/srv/gha-cache"
+  permissions: "755"
+
+runners:
+  # CPU runners for prep work
+  - "cpu-small-1"
+  - "cpu-medium-1"
+
+  # GPU runners for training
+  - "gpu-large-1"
+  - "gpu-max-1"
+
+sizes:
+  small:
+    cpus: 2.0
+    mem_limit: "4g"
+    pids_limit: 2048
+  medium:
+    cpus: 6.0
+    mem_limit: "16g"
+    pids_limit: 4096
+  large:
+    cpus: 12.0
+    mem_limit: "32g"
+    pids_limit: 8192
+  max:
+    cpus: null  # No limits - use all available
+    mem_limit: null
+    pids_limit: null
+
+runner:
+  version: "2.329.0"
+  arch: "linux-x64"
+
+github_api:
+  enforce_labels: true
+
+# Note: GPU runners automatically get NVIDIA environment variables
+# configured in their systemd service. Make sure nvidia-docker2 is installed:
+#   sudo apt-get install -y nvidia-docker2
+#   sudo systemctl restart docker

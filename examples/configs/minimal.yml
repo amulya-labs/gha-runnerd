@@ -1,0 +1,31 @@
+# Minimal configuration for a small deployment
+# Perfect for personal projects or small teams
+
+github:
+  org: "your-org"
+  prefix: "dev"
+
+host:
+  label: "dev-server"
+  runner_base: "/srv/gha"
+  docker_socket: "/var/run/docker.sock"
+  docker_user_uid: 1003
+  docker_user_gid: 1003
+
+runners:
+  - "cpu-small-1"
+  - "cpu-medium-1"
+
+sizes:
+  small:
+    cpus: 2.0
+    mem_limit: "4g"
+    pids_limit: 2048
+  medium:
+    cpus: 6.0
+    mem_limit: "16g"
+    pids_limit: 4096
+
+runner:
+  version: "2.329.0"
+  arch: "linux-x64"

@@ -1,0 +1,92 @@
+name: Python CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # Quick linting on xs runner
+  lint:
+    runs-on: [self-hosted, linux, cpu, xs, generic]
+    container:
+      image: python:3.11-slim
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache dependencies
+        uses: corca-ai/local-cache@v2
+        with:
+          key: pip-${{ hashFiles('requirements.txt') }}
+          path: /root/.cache/pip
+          base: /srv/gha-cache
+
+      - name: Install dependencies
+        run: pip install ruff black mypy
+
+      - name: Lint with ruff
+        run: ruff check .
+
+      - name: Format check with black
+        run: black --check .
+
+      - name: Type check with mypy
+        run: mypy .
+
+  # Unit tests on small runner
+  test:
+    runs-on: [self-hosted, linux, cpu, small, generic]
+    container:
+      image: python:3.11
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache dependencies
+        uses: corca-ai/local-cache@v2
+        with:
+          key: pip-${{ hashFiles('requirements.txt') }}
+          path: /root/.cache/pip
+          base: /srv/gha-cache
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run tests
+        run: pytest --cov=. --cov-report=xml
+
+  # Integration tests on medium runner
+  integration:
+    runs-on: [self-hosted, linux, cpu, medium, generic]
+    container:
+      image: python:3.11
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache dependencies
+        uses: corca-ai/local-cache@v2
+        with:
+          key: pip-integration-${{ hashFiles('requirements.txt') }}
+          path: /root/.cache/pip
+          base: /srv/gha-cache
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run integration tests
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@postgres:5432/test
+        run: pytest tests/integration/

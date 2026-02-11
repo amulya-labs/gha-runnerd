@@ -1,0 +1,106 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # Quick checks on small runner
+  check:
+    runs-on: [self-hosted, linux, cpu, small, generic]
+    container:
+      image: rust:1.75
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo registry
+        uses: corca-ai/local-cache@v2
+        with:
+          key: cargo-registry-${{ hashFiles('Cargo.lock') }}
+          path: /usr/local/cargo/registry
+          base: /srv/gha-cache
+
+      - name: Cache cargo index
+        uses: corca-ai/local-cache@v2
+        with:
+          key: cargo-index-${{ hashFiles('Cargo.lock') }}
+          path: /usr/local/cargo/git
+          base: /srv/gha-cache
+
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+  # Tests on medium runner
+  test:
+    runs-on: [self-hosted, linux, cpu, medium, generic]
+    container:
+      image: rust:1.75
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo registry
+        uses: corca-ai/local-cache@v2
+        with:
+          key: cargo-registry-${{ hashFiles('Cargo.lock') }}
+          path: /usr/local/cargo/registry
+          base: /srv/gha-cache
+
+      - name: Cache cargo index
+        uses: corca-ai/local-cache@v2
+        with:
+          key: cargo-index-${{ hashFiles('Cargo.lock') }}
+          path: /usr/local/cargo/git
+          base: /srv/gha-cache
+
+      - name: Cache build artifacts
+        uses: corca-ai/local-cache@v2
+        with:
+          key: cargo-build-${{ hashFiles('Cargo.lock') }}
+          path: target
+          base: /srv/gha-cache
+
+      - name: Run tests
+        run: cargo test --verbose
+
+  # Release build on large runner
+  build:
+    runs-on: [self-hosted, linux, cpu, large, generic]
+    container:
+      image: rust:1.75
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo registry
+        uses: corca-ai/local-cache@v2
+        with:
+          key: cargo-registry-${{ hashFiles('Cargo.lock') }}
+          path: /usr/local/cargo/registry
+          base: /srv/gha-cache
+
+      - name: Cache cargo index
+        uses: corca-ai/local-cache@v2
+        with:
+          key: cargo-index-${{ hashFiles('Cargo.lock') }}
+          path: /usr/local/cargo/git
+          base: /srv/gha-cache
+
+      - name: Cache build artifacts
+        uses: corca-ai/local-cache@v2
+        with:
+          key: cargo-release-${{ hashFiles('Cargo.lock') }}
+          path: target
+          base: /srv/gha-cache
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary
+          path: target/release/myapp
