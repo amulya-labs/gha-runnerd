@@ -60,10 +60,14 @@ class TestConfigParsing(unittest.TestCase):
             },
             'host': {
                 'runner_base': '/srv/gha',
-                'cache_base': '/srv/gha-cache',
-                'runner_user': 'ci-docker',
-                'runner_uid': 1003,
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
                 'label': 'test-host'
+            },
+            'cache': {
+                'base_dir': '/srv/gha-cache',
+                'permissions': '755'
             },
             'runners': ['cpu-small-1'],
             'sizes': {
@@ -74,7 +78,7 @@ class TestConfigParsing(unittest.TestCase):
             },
             'runner': {
                 'version': '2.321.0',
-                'arch': 'x64'
+                'arch': 'linux-x64'
             }
         }
         self._write_config(config)
@@ -108,10 +112,14 @@ class TestConfigParsing(unittest.TestCase):
             },
             'host': {
                 'runner_base': '/srv/gha',
-                'cache_base': '/srv/gha-cache',
-                'runner_user': 'ci-docker',
-                'runner_uid': 1003,
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
                 'label': 'test-host'
+            },
+            'cache': {
+                'base_dir': '/srv/gha-cache',
+                'permissions': '755'
             },
             'runners': ['gpu-max-1'],
             'sizes': {
@@ -122,7 +130,7 @@ class TestConfigParsing(unittest.TestCase):
             },
             'runner': {
                 'version': '2.321.0',
-                'arch': 'x64'
+                'arch': 'linux-x64'
             }
         }
         self._write_config(config)
@@ -142,10 +150,14 @@ class TestConfigParsing(unittest.TestCase):
             },
             'host': {
                 'runner_base': '/srv/gha',
-                'cache_base': '/srv/gha-cache',
-                'runner_user': 'ci-docker',
-                'runner_uid': 1003,
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
                 'label': 'test-host'
+            },
+            'cache': {
+                'base_dir': '/srv/gha-cache',
+                'permissions': '755'
             },
             'runners': [
                 'cpu-small-1',
@@ -161,11 +173,11 @@ class TestConfigParsing(unittest.TestCase):
             },
             'runner': {
                 'version': '2.321.0',
-                'arch': 'x64'
+                'arch': 'linux-x64'
             }
         }
         self._write_config(config)
-        
+
         deployer = HostDeployer(config_path=str(self.config_file))
         self.assertEqual(len(deployer.runners), 4)
 
@@ -336,12 +348,18 @@ class TestConfigDefaults(unittest.TestCase):
                 'github': {'org': 'test-org', 'prefix': 'test'},
                 'host': {
                     'runner_base': '/srv/gha',
-                    'cache_base': '/srv/gha-cache',
+                    'docker_socket': '/var/run/docker.sock',
+                    'docker_user_uid': 1003,
+                    'docker_user_gid': 1003,
                     'label': 'test-host'
+                },
+                'cache': {
+                    'base_dir': '/srv/gha-cache',
+                    'permissions': '755'
                 },
                 'runners': ['cpu-small-1'],
                 'sizes': {'small': {'cpus': 2.0, 'mem_limit': '4g'}},
-                'runner': {'version': '2.321.0', 'arch': 'x64'}
+                'runner': {'version': '2.321.0', 'arch': 'linux-x64'}
             }, f)
             config_path = f.name
         

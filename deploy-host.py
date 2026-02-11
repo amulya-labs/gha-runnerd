@@ -1213,21 +1213,46 @@ WantedBy=multi-user.target
         # Print table header
         log(f"{'Runner Name':<30} {'Service':<40} {'Status':<15} {'Path Exists':<12}", "header")
         log("-" * 100, "header")
-        
+
+        # Use direct ANSI coloring for the status column to keep table alignment,
+        # avoiding log() mid-row (which would add prefixes like [SUCCESS])
         for runner in runners_found:
-            status_color = "success" if runner['status'] == "active" else "warning"
+            if runner['status'] == "active":
+                status_ansi = "\033[32m"  # green
+            else:
+                status_ansi = "\033[33m"  # yellow
+            reset_ansi = "\033[0m"
+
             exists_str = "✓" if runner['exists'] else "✗"
-            
-            print(f"{runner['name']:<30} {runner['service']:<40} ", end="")
-            log(f"{runner['status']:<15}", status_color, newline=False)
-            print(f" {exists_str:<12}")
+            status_field = f"{runner['status']:<15}"
+            colored_status = f"{status_ansi}{status_field}{reset_ansi}"
+
+            row = (
+                f"{runner['name']:<30} "
+                f"{runner['service']:<40} "
+                f"{colored_status} "
+                f"{exists_str:<12}"
+            )
+            print(row)
         
         log(f"\nTotal runners: {len(runners_found)}", "info")
 
     def remove_runner(self, runner_name: str):
         """Remove a specific runner by name"""
         log(f"Removing runner: {runner_name}\n", "warning")
-        
+
+        # Validate runner_name to prevent path traversal attacks
+        # Only allow alphanumeric, hyphens, and underscores
+        import re
+        if not re.match(r'^[a-zA-Z0-9_-]+$', runner_name):
+            log(f"Invalid runner name '{runner_name}': only alphanumeric, hyphens, and underscores allowed", "error")
+            return False
+
+        # Additional check for path traversal patterns
+        if '..' in runner_name or '/' in runner_name:
+            log(f"Invalid runner name '{runner_name}': path traversal detected", "error")
+            return False
+
         prefix = self.config['github']['prefix']
         service_name = f"gha-{prefix}-linux-{runner_name}.service"
         runner_path = Path(f"{self.config['host']['runner_base']}/{prefix}-linux-{runner_name}")
@@ -1335,11 +1360,17 @@ WantedBy=multi-user.target
             return
         
         log(f"Found {len(runners_to_upgrade)} runner(s) to upgrade", "info")
-        
-        # Get runner version from config
-        runner_version = self.config['runner']['version']
-        runner_url = f"https://github.com/actions/runner/releases/download/v{runner_version}/actions-runner-linux-x64-{runner_version}.tar.gz"
-        runner_tarball = f"/tmp/actions-runner-{runner_version}.tar.gz"
+
+        # Get runner version and download URL from config
+        runner_cfg = self.config.get('runner', {})
+        runner_version = runner_cfg['version']
+        runner_arch = runner_cfg.get('arch', 'linux-x64')
+        download_url_template = runner_cfg.get(
+            'download_url_template',
+            "https://github.com/actions/runner/releases/download/v{version}/actions-runner-{arch}-{version}.tar.gz",
+        )
+        runner_url = download_url_template.format(version=runner_version, arch=runner_arch)
+        runner_tarball = f"/tmp/actions-runner-{runner_arch}-{runner_version}.tar.gz"
         
         log(f"\nDownloading runner version {runner_version}...", "info")
         if not Path(runner_tarball).exists():
@@ -1369,14 +1400,18 @@ WantedBy=multi-user.target
             if not backup_marker.exists():
                 log(f"Creating backup of runner binaries...", "info")
                 run_cmd(
-                    ["tar", "-czf", f"{runner_info['path']}.backup.tar.gz", 
-                     "-C", str(runner_info['path']), 
-                     "--exclude=_work", "--exclude=.runner", 
+                    ["tar", "-czf", f"{runner_info['path']}.backup.tar.gz",
+                     "-C", str(runner_info['path']),
+                     "--exclude=_work", "--exclude=.runner",
                      "."],
                     sudo=True,
                     sudo_reason="backing up runner before upgrade"
                 )
-                backup_marker.touch()
+                run_cmd(
+                    ["touch", str(backup_marker)],
+                    sudo=True,
+                    sudo_reason="creating backup marker after runner backup"
+                )
             
             # Extract new binaries (preserve _work and .runner)
             log(f"Extracting new runner binaries...", "info")
