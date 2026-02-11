@@ -43,7 +43,7 @@ Integration tests covering:
   - Invalid runner size rejection
 
 - **Config Defaults**
-  - Default runner_user and runner_uid application
+  - Cache defaults application (base_dir, permissions)
 
 ## Adding New Tests
 

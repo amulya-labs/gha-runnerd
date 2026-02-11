@@ -1336,8 +1336,8 @@ WantedBy=multi-user.target
         
         log(f"Found {len(runners_to_upgrade)} runner(s) to upgrade", "info")
         
-        # Download latest runner package
-        runner_version = "2.321.0"  # This should ideally fetch the latest version
+        # Get runner version from config
+        runner_version = self.config['runner']['version']
         runner_url = f"https://github.com/actions/runner/releases/download/v{runner_version}/actions-runner-linux-x64-{runner_version}.tar.gz"
         runner_tarball = f"/tmp/actions-runner-{runner_version}.tar.gz"
         
@@ -1389,8 +1389,10 @@ WantedBy=multi-user.target
             )
             
             # Fix permissions
+            runner_uid = self.config['host'].get('docker_user_uid', 1003)
+            runner_gid = self.config['host'].get('docker_user_gid', 1003)
             run_cmd(
-                ["chown", "-R", "1003:1003", str(runner_info['path'])],
+                ["chown", "-R", f"{runner_uid}:{runner_gid}", str(runner_info['path'])],
                 sudo=True,
                 sudo_reason="fixing permissions after upgrade"
             )
