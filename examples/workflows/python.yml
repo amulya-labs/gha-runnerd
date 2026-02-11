@@ -13,7 +13,7 @@ jobs:
     container:
       image: python:3.11-slim
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Cache dependencies
         uses: corca-ai/local-cache@v2
@@ -40,7 +40,7 @@ jobs:
     container:
       image: python:3.11
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Cache dependencies
         uses: corca-ai/local-cache@v2
@@ -74,7 +74,7 @@ jobs:
           --health-retries 5
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Cache dependencies
         uses: corca-ai/local-cache@v2

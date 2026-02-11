@@ -8,6 +8,34 @@
 
 Host-based runners with **container-first workflows** for maximum flexibility and performance.
 
+## TL;DR - 5-Minute Setup
+
+```bash
+# 1. Install prerequisites
+curl -fsSL https://get.docker.com | sudo sh
+sudo apt install gh
+pip install -r requirements.txt
+
+# 2. Authenticate with GitHub
+gh auth login
+
+# 3. Configure
+cp config.example.yml config.yml
+vim config.yml  # Set your org and runners
+
+# 4. Deploy
+./deploy-host.py --validate  # Check config
+./deploy-host.py             # Deploy runners
+
+# 5. Use in workflows
+# runs-on: [self-hosted, linux, cpu, small, generic]
+# container: { image: python:3.11 }
+```
+
+**New to self-hosted runners?** Start with the [Quick Start](#quick-start) guide below.
+
+**Migrating from another setup?** See the [Migration Guide](docs/MIGRATION.md).
+
 ## Philosophy
 
 - **Generic or specialized runners** - `cpu`/`gpu` types with optional category
@@ -82,6 +110,7 @@ gh auth login
 - The script requires `gh` CLI authentication to fetch runner registration tokens automatically
 - Alternatively, manually set `REGISTER_GITHUB_RUNNER_TOKEN` environment variable
 - You need organization admin permissions to register runners
+- The deployment script will automatically create the `ci-docker` user, directories, and configuration if they don't exist
 
 ---
 
@@ -135,29 +164,7 @@ sudo systemctl status 'gha-*'
 
 ---
 
-## Setup
-
-### Prerequisites
-
-```bash
-# Install Docker
-curl -fsSL https://get.docker.com | sudo sh
-
-# Create ci-docker user (UID 1003)
-sudo useradd -m -u 1003 ci-docker
-sudo usermod -aG docker ci-docker
-
-# Setup workspace and shared cache directory
-sudo mkdir -p /srv/gha /srv/gha-cache
-sudo chown -R 1003:1003 /srv/gha /srv/gha-cache
-
-# Install Python dependencies
-pip install -r requirements.txt
-```
-
-> **Note:** `/srv/gha-cache` is a shared cache directory used by all runners. The deploy script will create it automatically if it doesn't exist.
-
-### Configuration
+## Configuration
 
 Edit `config.yml`:
 
@@ -497,6 +504,69 @@ Dry-run shows:
 
 Perfect for testing configuration changes before applying them.
 
+### List Deployed Runners
+
+View all currently deployed runners and their status:
+
+```bash
+./deploy-host.py --list
+```
+
+Shows:
+- Runner names and service status
+- Resource limits (CPU, memory)
+- Whether services are active/inactive
+- Systemd service names
+
+### Remove a Runner
+
+Remove a specific runner from the system:
+
+```bash
+./deploy-host.py --remove cpu-small-1
+```
+
+This will:
+- Stop and disable the systemd service
+- Remove the runner directory
+- Clean up service files
+
+**Note:** The runner will auto-remove from GitHub after 30 days offline.
+
+### Upgrade Runner Binaries
+
+Upgrade all deployed runners to a new version:
+
+```bash
+# 1. Update version in config.yml
+vim config.yml  # Change runner.version to new version
+
+# 2. Run upgrade
+./deploy-host.py --upgrade
+```
+
+The upgrade process:
+- Downloads new runner binaries
+- Stops each runner service
+- Replaces the runner binary
+- Restarts the service
+- Preserves runner registration (no re-registration needed)
+
+**Important:** Always test upgrades on a non-production runner first.
+
+### Custom Configuration File
+
+Use a different configuration file:
+
+```bash
+./deploy-host.py --config custom-config.yml
+```
+
+Useful for:
+- Managing multiple environments (dev, staging, prod)
+- Testing configuration changes
+- Per-host configurations
+
 ### Verbose Output
 
 Enable detailed logging for troubleshooting:
@@ -522,8 +592,11 @@ You can combine multiple flags:
 # Dry-run with verbose output to see all details
 ./deploy-host.py --dry-run --verbose
 
-# Deploy with verbose logging
-./deploy-host.py --verbose
+# Deploy with verbose logging and custom config
+./deploy-host.py --config prod.yml --verbose
+
+# List runners with verbose output
+./deploy-host.py --list --verbose
 ```
 
 ---
@@ -600,6 +673,61 @@ You can combine multiple flags:
 - Updates systemd service files with new limits
 - Restarts affected runners
 - No re-registration needed
+
+### Upgrading Runner Binaries
+
+**Update runners to a new GitHub Actions runner version:**
+
+1. Check current runner version:
+   ```bash
+   grep "version:" config.yml
+   ```
+
+2. Update version in `config.yml`:
+   ```yaml
+   runner:
+     version: "2.329.0"  # Update to new version
+     arch: "linux-x64"
+   ```
+
+3. Preview the upgrade:
+   ```bash
+   ./deploy-host.py --upgrade --dry-run
+   ```
+
+4. Perform the upgrade:
+   ```bash
+   ./deploy-host.py --upgrade
+   ```
+
+**What happens:**
+- Downloads new runner binaries
+- Stops each runner service gracefully (waits for current job to complete)
+- Replaces runner binaries
+- Restarts services
+- Preserves runner registration and configuration
+
+**Best practices:**
+- **Test first**: Upgrade one non-critical runner before upgrading all
+- **Check release notes**: Review [GitHub Actions Runner releases](https://github.com/actions/runner/releases) for breaking changes
+- **Monitor workflows**: Watch for any issues after upgrade
+- **Backup**: The old runner binary is preserved as `run.sh.old` during upgrade
+- **Timing**: Upgrade during low-activity periods when possible
+
+**Rollback if needed:**
+If the new version causes issues, you can rollback:
+```bash
+# Stop the service
+sudo systemctl stop gha-my-linux-cpu-small-1
+
+# Restore old binary
+cd /srv/gha/my-linux-cpu-small-1
+mv run.sh.old run.sh
+
+# Update config.yml to old version
+# Then restart
+sudo systemctl start gha-my-linux-cpu-small-1
+```
 
 ### Common Commands
 
@@ -1221,6 +1349,201 @@ Consider alternatives if you need:
 - **Automatic scaling** → Use ARC with HPA or GitHub-hosted runners
 - **Windows/macOS runners** → Use GitHub-hosted runners or other solutions
 - **Zero maintenance** → Use GitHub-hosted runners
+
+---
+
+## Frequently Asked Questions (FAQ)
+
+### General Questions
+
+**Q: When should I use gha-runnerd instead of GitHub-hosted runners?**
+
+A: Consider gha-runnerd when you:
+- Run 50+ builds/day and want faster caching (sub-second vs 10-60s)
+- Need specialized hardware (GPU, custom CPU architectures)
+- Have compliance or data residency requirements
+- Want predictable costs (pay for hardware, not per-minute)
+- Need to avoid the 6-hour job timeout limit
+
+GitHub-hosted runners are better for:
+- Small projects with occasional builds
+- Windows or macOS builds
+- Teams wanting zero infrastructure maintenance
+
+**Q: Can I run multiple gha-runnerd instances on the same host?**
+
+A: Yes! Just ensure runner names are unique across your organization. You can:
+- Use different prefixes per host (`dev`, `staging`, `prod`)
+- Deploy different runner sizes on the same host
+- Mix CPU and GPU runners on the same host (if hardware supports it)
+
+**Q: How do I scale my runner fleet?**
+
+A: gha-runnerd uses static runner allocation. To scale:
+1. **Vertical scaling**: Increase runner sizes in `config.yml` (small → medium → large)
+2. **Horizontal scaling**: Add more runner instances to `config.yml` (`cpu-small-1`, `cpu-small-2`, etc.)
+3. **Multi-host scaling**: Deploy gha-runnerd on additional hosts with unique prefixes
+
+There's no auto-scaling. If you need dynamic scaling, consider [actions-runner-controller](https://github.com/actions/actions-runner-controller).
+
+### Runner Management
+
+**Q: What happens when a runner goes offline?**
+
+A:
+- **Temporary offline**: GitHub queues jobs until the runner returns (up to 24 hours)
+- **Long-term offline**: After 30 days, GitHub automatically removes the runner registration
+- **Planned maintenance**: Stop the systemd service, perform maintenance, restart service
+
+**Q: How do I update runner binaries?**
+
+A: Use the `--upgrade` command:
+```bash
+# 1. Update version in config.yml
+vim config.yml  # Change runner.version
+
+# 2. Run upgrade
+./deploy-host.py --upgrade
+```
+
+The upgrade preserves runner registration and waits for current jobs to complete.
+
+**Q: Can I remove a runner without deleting it from GitHub?**
+
+A: Yes, use `--remove`:
+```bash
+./deploy-host.py --remove cpu-small-1
+```
+
+The runner will auto-remove from GitHub after 30 days offline. To manually remove from GitHub, use the web UI or `gh api`.
+
+**Q: How do I move a runner to a different host?**
+
+A: Runners are tied to their registration. To move:
+1. Deploy a new runner on the new host with a different name
+2. Update workflows to use the new runner labels
+3. Remove the old runner once workflows are migrated
+
+### Workflow Questions
+
+**Q: Do I need to install dependencies on the host?**
+
+A: No! Use containers for dependencies:
+```yaml
+container:
+  image: python:3.11  # All Python dependencies in container
+```
+
+Only install on host if:
+- Using specialized runners (category: `docker`, `bazel`)
+- Requiring host-level tools (unusual)
+
+**Q: Can I use service containers (databases, Redis, etc.)?**
+
+A: Yes! Service containers work perfectly:
+```yaml
+services:
+  postgres:
+    image: postgres:15
+```
+
+See the [Using Service Containers](#using-service-containers) section for examples.
+
+**Q: Why is my cache always missing?**
+
+A: Check three things:
+1. **Shared cache directory exists**: `ls -la /srv/gha-cache/`
+2. **Workflow has base parameter**: `base: /srv/gha-cache`
+3. **Cache key matches**: Check for typos in your cache key
+
+See [Cache Not Working](#cache-not-working) in Troubleshooting.
+
+**Q: Can I use both containerized and non-containerized jobs?**
+
+A: Yes! Use different runner categories:
+- **Containerized jobs**: `runs-on: [self-hosted, linux, cpu, medium, generic]`
+- **Host jobs** (Docker builds): `runs-on: [self-hosted, linux, cpu, medium, docker]`
+
+### Security Questions
+
+**Q: Is it safe to run external pull requests on self-hosted runners?**
+
+A: **Generally no.** Self-hosted runners execute arbitrary code, so external PRs are risky. Options:
+1. **Require approval**: GitHub org setting "Require approval for all outside collaborators"
+2. **Use GitHub-hosted for PRs**: Mix self-hosted (for main/branches) with GitHub-hosted (for external PRs)
+3. **Separate runner pool**: Dedicated runners for untrusted code with strict network isolation
+
+See [SECURITY.md](SECURITY.md) for comprehensive security guidance.
+
+**Q: How are secrets handled?**
+
+A:
+- Secrets are passed to workflows as environment variables
+- They're masked in logs but accessible to workflow code
+- **Important**: Self-hosted runners don't encrypt secrets at rest
+- Treat runner hosts as if they have access to all organization secrets
+
+**Q: Can workflows access files outside their workspace?**
+
+A: By default, no. Workflows run with limited permissions:
+- Can read/write in `/srv/gha/{runner-name}/_work/`
+- Can access shared cache `/srv/gha-cache/`
+- Cannot access other runners' workspaces
+- Cannot access root-owned files
+
+### Performance Questions
+
+**Q: How much faster is local cache compared to GitHub cache?**
+
+A: Typically:
+- **GitHub cloud cache**: 10-60 seconds restore time
+- **Local cache** (corca-ai/local-cache): Sub-second (often <100ms)
+
+The speed difference compounds across multiple cache operations per workflow.
+
+**Q: How much disk space do I need?**
+
+A: Recommended:
+- **OS + tools**: 10GB
+- **Runner binaries**: ~500MB per runner
+- **Docker images**: 5-20GB depending on images used
+- **Cache storage**: 10-50GB (monitor `/srv/gha-cache/`)
+- **Workspace**: 5-10GB per active runner
+
+Total: 50-100GB minimum, 200GB+ recommended for production.
+
+**Q: Can I limit disk space for caches?**
+
+A: The cache directory isn't automatically limited. Options:
+1. **Manual cleanup**: Periodically delete old caches
+2. **Monitoring**: Set up alerts for disk usage
+3. **Separate partition**: Mount `/srv/gha-cache` on a separate partition with size limits
+
+### Troubleshooting
+
+**Q: How do I debug a failing runner?**
+
+A:
+```bash
+# Check service status
+sudo systemctl status gha-my-linux-cpu-small-1
+
+# View recent logs
+sudo journalctl -u gha-my-linux-cpu-small-1 -n 100
+
+# Follow logs in real-time
+sudo journalctl -u gha-my-linux-cpu-small-1 -f
+```
+
+See the [Troubleshooting](#troubleshooting) section for common issues.
+
+**Q: Where can I get help?**
+
+A:
+1. Check [Troubleshooting](#troubleshooting) section
+2. Review [SECURITY.md](SECURITY.md) for security issues
+3. Check [existing issues](https://github.com/amulya-labs/gha-runnerd/issues)
+4. Open a [new issue](https://github.com/amulya-labs/gha-runnerd/issues/new) with details
 
 ---
 
