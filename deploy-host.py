@@ -20,6 +20,7 @@ import shlex
 import shutil
 import argparse
 import time
+import re
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
@@ -1243,14 +1244,8 @@ WantedBy=multi-user.target
 
         # Validate runner_name to prevent path traversal attacks
         # Only allow alphanumeric, hyphens, and underscores
-        import re
         if not re.match(r'^[a-zA-Z0-9_-]+$', runner_name):
             log(f"Invalid runner name '{runner_name}': only alphanumeric, hyphens, and underscores allowed", "error")
-            return False
-
-        # Additional check for path traversal patterns
-        if '..' in runner_name or '/' in runner_name:
-            log(f"Invalid runner name '{runner_name}': path traversal detected", "error")
             return False
 
         prefix = self.config['github']['prefix']
