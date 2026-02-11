@@ -1,5 +1,11 @@
 # GitHub Actions Self-Hosted Runner Stack
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/amulya-labs/gha-runnerd/workflows/CI/badge.svg)](https://github.com/amulya-labs/gha-runnerd/actions)
+[![Lint](https://github.com/amulya-labs/gha-runnerd/workflows/Lint/badge.svg)](https://github.com/amulya-labs/gha-runnerd/actions)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Code of Conduct](https://img.shields.io/badge/code%20of%20conduct-contributor%20covenant-green.svg)](CODE_OF_CONDUCT.md)
+
 Host-based runners with **container-first workflows** for maximum flexibility and performance.
 
 ## Philosophy
@@ -1178,6 +1184,46 @@ Firewall rules apply at host level.
 
 ---
 
+## Limitations
+
+While gha-runnerd provides significant benefits, be aware of these limitations:
+
+### Platform Support
+- **Linux only** - Currently supports Ubuntu 20.04+ and Debian 11+ with systemd
+- **No Windows/macOS** - Host-based approach requires Linux-specific features
+- **systemd required** - Uses systemd for service management
+
+### Runner Lifecycle
+- **No auto-scaling** - Runners are static; no dynamic scaling based on queue depth
+- **Manual updates** - Runner binary updates require manual intervention (use `--upgrade` command)
+- **No ephemeral runners** - Runners persist across jobs (workspaces are reused)
+
+### Resource Management
+- **No automatic resource cleanup** - Workspaces (`_work`) persist and grow over time
+- **Manual monitoring required** - No built-in metrics or alerting for runner health
+- **Shared host resources** - Multiple runners compete for host CPU/memory/disk
+
+### Security Considerations
+- **Shared kernel** - Containers provide process isolation but share the host kernel
+- **Persistent workspaces** - Job artifacts remain on disk unless manually cleaned
+- **No built-in secrets rotation** - GitHub tokens and secrets management is manual
+
+### Operational Overhead
+- **Manual deployment** - No automated fleet management or orchestration
+- **Limited observability** - Relies on systemd logs and manual inspection
+- **No built-in backup/restore** - Configuration and state backup is manual
+
+### When NOT to Use gha-runnerd
+
+Consider alternatives if you need:
+- **Kubernetes-native deployment** → Use [actions-runner-controller](https://github.com/actions/actions-runner-controller)
+- **Ephemeral runners** → Use GitHub-hosted runners or ARC
+- **Automatic scaling** → Use ARC with HPA or GitHub-hosted runners
+- **Windows/macOS runners** → Use GitHub-hosted runners or other solutions
+- **Zero maintenance** → Use GitHub-hosted runners
+
+---
+
 ## Related Documentation
 
 - **GitHub Docs**: https://docs.github.com/en/actions/hosting-your-own-runners
@@ -1188,69 +1234,25 @@ Firewall rules apply at host level.
 
 ## Migration Guide
 
-### From Docker-Based Runners
+Migrating from another runner setup? See the comprehensive [Migration Guide](docs/MIGRATION.md) for detailed instructions:
+
+- **From Docker-Based Runners** - Step-by-step migration from docker-compose runners
+- **From GitHub-Hosted Runners** - How to switch from GitHub's hosted runners
+- **From actions-runner-controller** - Migrating from Kubernetes-based ARC
+- **Cache Migration** - Switch from `actions/cache` to local cache
+- **Rollback Procedures** - How to safely rollback if needed
+
+### Quick Migration Example
 
 ```bash
-# 1. Stop old containers
+# From docker-compose runners
 docker compose down
-docker ps -a --filter "name=gha-" --format "{{.Names}}" | xargs -r docker rm -f
-
-# 2. Backup data (optional)
-sudo mv /srv/gha /srv/gha.docker-backup
-
-# 3. Deploy new setup
-export REGISTER_GITHUB_RUNNER_TOKEN=<token>
+sudo mv /srv/gha /srv/gha.backup
 ./deploy-host.py
 
-# 4. Update workflows to use containers
-# Old:
-#   runs-on: [self-hosted, linux, rust, medium]
-# New:
-#   runs-on: [self-hosted, linux, cpu, medium]
-#   container:
-#     image: rust:latest
-
-# 5. Verify new setup works (run some workflows, check logs)
-sudo journalctl -u 'gha-*' -f
-# Test a few workflows to ensure everything works
-
-# 6. Clean up after verification (optional but recommended)
-# Remove backup
-sudo rm -rf /srv/gha.docker-backup
-
-# Clean up old Docker-based runner images (saves ~80GB)
-# First, preview what will be removed:
-docker images "*actions-runner-*"
-
-# If the list looks correct, remove them:
-docker rmi $(docker images "*actions-runner-*" -q)
-
-# Note: If you see "image is referenced in multiple repositories" errors,
-# this is normal for :latest tags. Run the command again with -f to force:
-docker rmi -f $(docker images "*actions-runner-*" -q)
-
-# Clean up unused Docker resources
-docker system prune -af --volumes
+# Update workflows to use containers
+# See docs/MIGRATION.md for complete details
 ```
-
-### From `actions/cache` to Local Cache
-
-```yaml
-# Before (cloud cache)
-- uses: actions/cache@v4
-  with:
-    path: ~/.cargo
-    key: cargo-${{ hashFiles('Cargo.lock') }}
-
-# After (local cache)
-- uses: corca-ai/local-cache@v2  # ← Only change this line!
-  with:
-    path: ~/.cargo
-    key: cargo-${{ hashFiles('Cargo.lock') }}
-    base: /srv/gha-cache  # ← Add this line!
-```
-
-</details>
 
 ---
 
