@@ -45,7 +45,7 @@ cd gha-runnerd
 pip install -r requirements.txt
 
 # Install development dependencies
-pip install pylint black isort
+pip install -r requirements-dev.txt
 ```
 
 ## Coding Standards
@@ -85,11 +85,11 @@ Before submitting a PR, test your changes:
 ### Manual Testing
 
 ```bash
-# Test configuration parsing
-python -c "from deploy_host import HostDeployer; d = HostDeployer('config.example.yml')"
+# Validate configuration
+./deploy-host.py --validate --config config.example.yml
 
-# Test with dry-run (if implemented)
-sudo -E ./deploy-host.py --dry-run
+# Test with dry-run
+./deploy-host.py --dry-run --config config.example.yml
 ```
 
 ## Documentation

@@ -13,7 +13,7 @@ jobs:
     container:
       image: rust:1.75
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Cache cargo registry
         uses: corca-ai/local-cache@v2
@@ -41,7 +41,7 @@ jobs:
     container:
       image: rust:1.75
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Cache cargo registry
         uses: corca-ai/local-cache@v2
@@ -73,7 +73,7 @@ jobs:
     container:
       image: rust:1.75
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Cache cargo registry
         uses: corca-ai/local-cache@v2

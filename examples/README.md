@@ -75,20 +75,41 @@ Example runner deployment configurations:
 - **Size runners appropriately** - Don't over-provision; start with small/medium
 - **Enable GPU only if needed** - Requires nvidia-docker2 and proper drivers
 
+## Using Example Configurations
+
+The example configs are ready to use with minimal changes:
+
+1. **Choose an example** that fits your needs (minimal, production, or gpu-enabled)
+2. **Copy it** to your config file:
+   ```bash
+   cp examples/configs/minimal.yml config.yml
+   ```
+3. **Edit organization details**:
+   ```bash
+   vim config.yml  # Update 'org' and 'prefix' values
+   ```
+4. **Validate and deploy**:
+   ```bash
+   ./deploy-host.py --validate
+   ./deploy-host.py
+   ```
+
 ## Testing Examples Locally
 
-Before deploying, test workflows locally:
+Before deploying to production, test with example configurations:
 
 ```bash
-# Validate config
+# Validate an example config
 ./deploy-host.py --validate --config examples/configs/minimal.yml
 
-# Dry-run deployment
+# Dry-run to preview deployment
 ./deploy-host.py --dry-run --config examples/configs/minimal.yml
 
-# Deploy to test
+# Deploy using example config (for testing)
 ./deploy-host.py --config examples/configs/minimal.yml
 ```
+
+**Note:** The `--config` flag allows you to use different configuration files for different environments or hosts.
 
 ## Questions?
 
