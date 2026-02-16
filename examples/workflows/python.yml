@@ -13,14 +13,13 @@ jobs:
     container:
       image: python:3.11-slim
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: Cache dependencies
-        uses: corca-ai/local-cache@v2
+        uses: amulya-labs/gha-opencache@v3
         with:
           key: pip-${{ hashFiles('requirements.txt') }}
           path: /root/.cache/pip
-          base: /srv/gha-cache
 
       - name: Install dependencies
         run: pip install ruff black mypy
@@ -40,14 +39,13 @@ jobs:
     container:
       image: python:3.11
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: Cache dependencies
-        uses: corca-ai/local-cache@v2
+        uses: amulya-labs/gha-opencache@v3
         with:
           key: pip-${{ hashFiles('requirements.txt') }}
           path: /root/.cache/pip
-          base: /srv/gha-cache
 
       - name: Install dependencies
         run: |
@@ -74,14 +72,13 @@ jobs:
           --health-retries 5
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: Cache dependencies
-        uses: corca-ai/local-cache@v2
+        uses: amulya-labs/gha-opencache@v3
         with:
           key: pip-integration-${{ hashFiles('requirements.txt') }}
           path: /root/.cache/pip
-          base: /srv/gha-cache
 
       - name: Install dependencies
         run: pip install -r requirements.txt

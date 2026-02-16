@@ -6,7 +6,7 @@ This guide helps you migrate to gha-runnerd from other runner setups.
 
 - [From Docker-Based Runners](#from-docker-based-runners)
 - [From GitHub-Hosted Runners](#from-github-hosted-runners)
-- [From actions/cache to Local Cache](#from-actionscache-to-local-cache)
+- [From actions/cache to gha-opencache](#from-actionscache-to-gha-opencache)
 - [From actions-runner-controller (ARC)](#from-actions-runner-controller-arc)
 - [Rollback Procedure](#rollback-procedure)
 
@@ -165,7 +165,7 @@ jobs:
 
 ### Step 3: Update Caching
 
-Replace GitHub's cloud cache with local cache for better performance:
+Replace GitHub's cloud cache with [gha-opencache](https://github.com/amulya-labs/gha-opencache) for better performance:
 
 ```yaml
 # Before (GitHub cloud cache)
@@ -174,12 +174,11 @@ Replace GitHub's cloud cache with local cache for better performance:
     path: ~/.cache/pip
     key: pip-${{ hashFiles('requirements.txt') }}
 
-# After (local cache)
-- uses: corca-ai/local-cache@v2
+# After (local cache with gha-opencache)
+- uses: amulya-labs/gha-opencache@v3
   with:
     path: ~/.cache/pip
     key: pip-${{ hashFiles('requirements.txt') }}
-    base: /srv/gha-cache
 ```
 
 ### Step 4: Gradual Migration
@@ -193,9 +192,9 @@ Migrate workflows incrementally:
 
 ---
 
-## From actions/cache to Local Cache
+## From actions/cache to gha-opencache
 
-Switch from GitHub's cloud cache to local cache for faster restores:
+Switch from GitHub's cloud cache to [gha-opencache](https://github.com/amulya-labs/gha-opencache) for faster restores:
 
 ### Simple Conversion
 
@@ -207,11 +206,10 @@ Switch from GitHub's cloud cache to local cache for faster restores:
     key: cargo-${{ hashFiles('Cargo.lock') }}
 
 # After (local cache - sub-second restore time)
-- uses: corca-ai/local-cache@v2
+- uses: amulya-labs/gha-opencache@v3
   with:
     path: ~/.cargo
     key: cargo-${{ hashFiles('Cargo.lock') }}
-    base: /srv/gha-cache  # Shared cache directory
 ```
 
 ### Multiple Cache Paths
@@ -228,8 +226,8 @@ Switch from GitHub's cloud cache to local cache for faster restores:
       target/
     key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
-# After (same structure)
-- uses: corca-ai/local-cache@v2
+# After (same structure - gha-opencache supports multi-path)
+- uses: amulya-labs/gha-opencache@v3
   with:
     path: |
       ~/.cargo/bin/
@@ -238,7 +236,6 @@ Switch from GitHub's cloud cache to local cache for faster restores:
       ~/.cargo/git/db/
       target/
     key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-    base: /srv/gha-cache
 ```
 
 ### Benefits
@@ -247,6 +244,7 @@ Switch from GitHub's cloud cache to local cache for faster restores:
 - **Reliability**: No network dependency for cache operations
 - **Cost**: No data transfer costs
 - **API compatible**: Drop-in replacement for `actions/cache`
+- **Multiple backends**: Local disk, S3, GCS (see gha-opencache docs)
 
 ---
 

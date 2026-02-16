@@ -11,17 +11,17 @@ jobs:
   build:
     runs-on: [self-hosted, linux, cpu, medium, docker]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Cache Docker layers
-        uses: corca-ai/local-cache@v2
+        uses: amulya-labs/gha-opencache@v3
         with:
-          key: docker-${{ github.sha }}
+          key: docker-${{ runner.os }}-${{ hashFiles('Dockerfile', 'docker/**', '.dockerignore') }}
+          restore-keys: docker-${{ runner.os }}-
           path: /tmp/.buildx-cache
-          base: /srv/gha-cache
 
       - name: Build Docker image
         uses: docker/build-push-action@v5
