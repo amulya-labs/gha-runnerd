@@ -1,14 +1,25 @@
-# GitHub Actions Self-Hosted Runner Stack
+# gha-runnerd
+
+**Deploy self-hosted GitHub Actions runners in 5 minutes.** Get sub-second caching, full container support, and predictable costs.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://github.com/amulya-labs/gha-runnerd/workflows/CI/badge.svg)](https://github.com/amulya-labs/gha-runnerd/actions)
-[![Lint](https://github.com/amulya-labs/gha-runnerd/workflows/Lint/badge.svg)](https://github.com/amulya-labs/gha-runnerd/actions)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![Code of Conduct](https://img.shields.io/badge/code%20of%20conduct-contributor%20covenant-green.svg)](CODE_OF_CONDUCT.md)
+[![Code of Conduct](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](CODE_OF_CONDUCT.md)
 
-Host-based runners with **container-first workflows** for maximum flexibility and performance.
+---
 
-## TL;DR - 5-Minute Setup
+## What is this?
+
+**gha-runnerd** (GitHub Actions Runner Daemon) is a deployment tool that sets up self-hosted CI/CD runners on your Linux servers. Instead of paying GitHub per-minute for hosted runners, you run builds on your own hardware with better performance and lower costs.
+
+**For decision-makers:** Reduce CI/CD costs by 60-80% while getting 10-60x faster dependency caching. Your code stays on your infrastructure.
+
+**For engineers:** A single Python script that configures systemd services, handles GitHub registration, and manages the full runner lifecycle. No Kubernetes required.
+
+---
+
+## Quick Start (5 minutes)
 
 ```bash
 # 1. Install prerequisites
@@ -32,48 +43,65 @@ vim config.yml  # Set your org and runners
 # container: { image: python:3.11 }
 ```
 
-**New to self-hosted runners?** Start with the [Quick Start](#quick-start) guide below.
-
-**Migrating from another setup?** See the [Migration Guide](docs/MIGRATION.md).
-
-## Philosophy
-
-- **Generic or specialized runners** - `cpu`/`gpu` types with optional category
-- **Dependencies in containers** - Use official images (rust:latest, node:20, etc.) when possible
-- **Specialized runners** - Optional category for cases requiring host access (Docker builds, etc.)
-- **Fast local caching** - `corca-ai/local-cache` for zero network overhead
-- **Full `jobs.container` support** - No nested container issues
+**Next steps:**
+- [Detailed setup guide](#installation) | [Migration from other setups](docs/MIGRATION.md) | [Security considerations](SECURITY.md)
 
 ---
 
 ## Why gha-runnerd?
 
-**Choose gha-runnerd when you need:**
+| Feature | gha-runnerd | GitHub-hosted | actions-runner-controller |
+|---------|-------------|---------------|---------------------------|
+| **Cache restore time** | Sub-second | 10-60 seconds | Cluster-dependent |
+| **Setup time** | 5 minutes | N/A | Hours (Kubernetes) |
+| **Cost model** | Fixed (hardware) | Per-minute | Fixed (cluster) |
+| **`jobs.container` support** | Full | Full | Full |
+| **GPU support** | Yes | Limited | Yes |
+| **Kubernetes required** | No | N/A | Yes |
 
-- **Zero nested container issues** - Unlike docker-in-docker runners, gha-runnerd runs on the host and fully supports `jobs.container`, avoiding compatibility problems with Node-based actions and complex container setups
-- **Lightning-fast caching** - Local cache with sub-second restore times vs GitHub-hosted runners (10-60s cache restore)
-- **Full control over infrastructure** - Custom hardware, GPUs, specialized build tools, compliance requirements, or air-gapped environments
-- **Predictable costs** - No per-minute charges; pay only for your hardware
-- **Container-first workflows** - Use official images (rust:latest, node:20, python:3.11) without pre-installing dependencies on the host
+### Key benefits
 
-**Comparison with alternatives:**
+- **60x faster caching** - Local disk cache restores in milliseconds, not minutes
+- **Zero nested container issues** - Host-based runners fully support `jobs.container` with no Docker-in-Docker complexity
+- **Predictable costs** - Pay for hardware once, not per-minute
+- **Container-first workflows** - Use `python:3.11`, `node:20`, `rust:latest` directly without host dependencies
+- **Full control** - Custom hardware, GPUs, compliance requirements, air-gapped environments
 
-| Feature | gha-runnerd | GitHub-hosted | actions-runner-controller | docker-compose runners |
-|---------|-------------|---------------|---------------------------|------------------------|
-| `jobs.container` support | ✅ Full | ✅ Full | ✅ Full | ❌ Nested container issues |
-| Cache performance | ⚡ Sub-second | 🐢 10-60s | ⚡ Fast (cluster-dependent) | ⚡ Fast |
-| Kubernetes required | ❌ No | N/A | ✅ Yes | ❌ No |
-| GPU support | ✅ Yes | ✅ Limited | ✅ Yes | ✅ Yes |
-| Setup complexity | 🟢 Low (5 min) | N/A | 🟡 Medium-High | 🟢 Low |
-| Cost model | Fixed (hardware) | Per-minute | Fixed (cluster) | Fixed (hardware) |
+### Who should use this?
 
-**Who is this for?**
+- Teams running **50+ builds/day** where caching and costs matter
+- Organizations with **compliance or data residency** requirements
+- Projects needing **GPU or specialized hardware**
+- Anyone who wants **simple self-hosted runners without Kubernetes**
 
-- Teams running 50+ builds/day where cache performance and costs matter
-- Organizations with compliance or data residency requirements
-- Projects needing GPU, specialized hardware, or custom tooling
-- Teams migrating from GitHub-hosted runners to reduce costs
-- Developers wanting simple self-hosted runners without Kubernetes overhead
+---
+
+## How it works
+
+```
+┌─────────────────┐     ┌──────────────────────────────────────────┐
+│  GitHub.com     │     │  Your Linux Server                       │
+│                 │     │                                          │
+│  ┌───────────┐  │     │  ┌──────────────────────────────────┐   │
+│  │ Workflow  │──┼────▶│  │ systemd service (gha-runner)     │   │
+│  │ triggers  │  │     │  │                                  │   │
+│  └───────────┘  │     │  │  ┌─────────────────────────────┐ │   │
+│                 │     │  │  │ Job Container (python:3.11) │ │   │
+│                 │     │  │  │  - checkout                 │ │   │
+│                 │     │  │  │  - gha-opencache (restore)  │ │   │
+│                 │     │  │  │  - pip install              │ │   │
+│                 │     │  │  │  - pytest                   │ │   │
+│                 │     │  │  └─────────────────────────────┘ │   │
+│                 │     │  └──────────────────────────────────┘   │
+│                 │     │                                          │
+│                 │     │  /srv/gha-cache/ (shared, sub-second)   │
+└─────────────────┘     └──────────────────────────────────────────┘
+```
+
+1. **Runners run on host** as systemd services (not containers)
+2. **Jobs run in containers** using `jobs.container` for isolation
+3. **Cache is local** via [gha-opencache](https://github.com/amulya-labs/gha-opencache) - sub-second restores
+4. **No nested Docker** - full compatibility with all GitHub Actions
 
 ---
 
@@ -110,7 +138,7 @@ gh auth login
 - The script requires `gh` CLI authentication to fetch runner registration tokens automatically
 - Alternatively, manually set `REGISTER_GITHUB_RUNNER_TOKEN` environment variable
 - You need organization admin permissions to register runners
-- The deployment script will automatically create the `ci-docker` user, directories, and configuration if they don't exist
+- The deployment script will create required directories and configuration (with ownership set to your configured runner user), but it does **not** create the Unix user itself; you must create the runner user (e.g., `ci-docker`) beforehand
 
 ---
 
@@ -131,7 +159,7 @@ cp config.example.yml config.yml
 
 ---
 
-## Quick Start
+## Deploy
 
 ```bash
 # Validate configuration first (recommended)
@@ -220,7 +248,7 @@ host:
 
 # Cache configuration (OPTIONAL - defaults shown)
 cache:
-  base_dir: "/srv/gha-cache"    # Shared cache for corca-ai/local-cache
+  base_dir: "/srv/gha-cache"    # Shared cache for gha-opencache
   permissions: "755"            # Cache directory permissions
 
 # Runner binary settings (REQUIRED)
@@ -407,65 +435,64 @@ jobs:
 
 ### Caching Dependencies
 
-**Use `corca-ai/local-cache`** for fast local caching with the shared cache directory:
+**Use [`gha-opencache`](https://github.com/amulya-labs/gha-opencache)** for fast local caching. It's a drop-in replacement for `actions/cache` with pluggable backends (local disk, S3, GCS).
 
 ```yaml
-# Python (Poetry with virtualenvs-in-project: true)
+# Python (Poetry)
 - name: Cache Poetry dependencies
   id: cache-poetry
-  uses: corca-ai/local-cache@v2
+  uses: amulya-labs/gha-opencache@v3
   with:
     path: .venv
     key: poetry-${{ runner.os }}-${{ hashFiles('**/poetry.lock') }}
-    restore-keys: |
-      poetry-${{ runner.os }}-
-    base: /srv/gha-cache
+    restore-keys: poetry-${{ runner.os }}-
 
 - name: Warn on cache miss
   if: steps.cache-poetry.outputs.cache-hit != 'true'
   run: echo "::warning::Poetry cache miss. Installing from scratch."
 
-# Node.js
-- uses: corca-ai/local-cache@v2
+# Node.js (cache npm's cache directory when using npm ci)
+- uses: amulya-labs/gha-opencache@v3
   with:
     path: ~/.npm
     key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
-    restore-keys: |
-      npm-${{ runner.os }}-
-    base: /srv/gha-cache
+    restore-keys: npm-${{ runner.os }}-
 
-# Rust (separate caches for cargo and build artifacts)
-- uses: corca-ai/local-cache@v2
+# Rust
+- uses: amulya-labs/gha-opencache@v3
   with:
-    path: ~/.cargo
+    path: |
+      ~/.cargo/registry
+      ~/.cargo/git
+      target
     key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-    restore-keys: |
-      cargo-${{ runner.os }}-
-    base: /srv/gha-cache
-- uses: corca-ai/local-cache@v2
-  with:
-    path: target
-    key: target-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-    restore-keys: |
-      target-${{ runner.os }}-
-    base: /srv/gha-cache
+    restore-keys: cargo-${{ runner.os }}-
 ```
 
+**Why gha-opencache + gha-runnerd?**
+
+| Setup | Cache restore time | Where cache lives |
+|-------|-------------------|-------------------|
+| GitHub-hosted + `actions/cache` | 10-60 seconds | GitHub's servers |
+| Self-hosted + `actions/cache` | 10-60 seconds | GitHub's servers (network bottleneck) |
+| **gha-runnerd + gha-opencache** | **Sub-second** | **Local disk** |
+
+The combination eliminates network round-trips entirely. Caches are stored on the runner's local disk (`/srv/gha-cache/`) and shared across all runners on the same host.
+
 **Best practices:**
-- Always specify `base: /srv/gha-cache` to share cache across all runners
 - Use `restore-keys` for partial matching (falls back to older cache if exact match fails)
 - Add `${{ runner.os }}` to cache keys to avoid cross-platform issues
 - Add a "Warn on cache miss" step to make cache misses visible in logs
 
-**Note:** `corca-ai/local-cache` uses single paths per cache. For multiple directories, use separate cache steps.
-
 **Common cache paths:**
 - Python: `.venv` (with Poetry's `virtualenvs-in-project: true`)
-- Node: `~/.npm` or `node_modules`
-- Rust: `~/.cargo` and `target/` (separate caches)
+- Node: `~/.npm` (when using `npm ci`) or `node_modules` (when using `npm install`)
+- Rust: `~/.cargo/registry`, `~/.cargo/git`, and `target/`
 - Go: `~/go/pkg/mod` or `~/.cache/go-build`
 - Maven: `~/.m2/repository`
 - Gradle: `~/.gradle/caches`
+
+> **Note:** You can also use `corca-ai/local-cache@v2` with `base: /srv/gha-cache` as an alternative.
 
 ---
 
@@ -885,33 +912,28 @@ container:
 
 ```yaml
 - name: Cache dependencies
-  uses: corca-ai/local-cache@v2
+  uses: amulya-labs/gha-opencache@v3
   with:
     path: ~/.cargo/registry
     key: deps-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-    restore-keys: |
-      deps-${{ runner.os }}-
-    base: /srv/gha-cache
+    restore-keys: deps-${{ runner.os }}-
 
 - name: Cache build artifacts
-  uses: corca-ai/local-cache@v2
+  uses: amulya-labs/gha-opencache@v3
   with:
     path: target
     key: build-${{ runner.os }}-${{ hashFiles('src/**/*.rs') }}
-    restore-keys: |
-      build-${{ runner.os }}-
-    base: /srv/gha-cache
+    restore-keys: build-${{ runner.os }}-
 ```
 
 ### Conditional Caching
 
 ```yaml
-- uses: corca-ai/local-cache@v2
+- uses: amulya-labs/gha-opencache@v3
   if: ${{ !env.ACT }}  # Skip in local testing
   with:
     path: ~/.cache
     key: cache-key
-    base: /srv/gha-cache
 ```
 
 ### Cross-Job Caching
@@ -1049,7 +1071,7 @@ sudo cat /etc/sudoers.d/gha-runner-cleanup
 
 #### 7. Cache Not Working
 
-**Symptom:** "Cache not found" in every workflow run despite using `corca-ai/local-cache`
+**Symptom:** "Cache not found" in every workflow run
 
 **Solution:**
 ```bash
@@ -1061,20 +1083,17 @@ ls -la /srv/gha-cache/
 sudo mkdir -p /srv/gha-cache
 sudo chown 1003:1003 /srv/gha-cache
 sudo chmod 755 /srv/gha-cache
-
-# 3. Verify workflow has `base: /srv/gha-cache`
 ```
 
-**In your workflow:**
+**In your workflow with gha-opencache:**
 ```yaml
-- uses: corca-ai/local-cache@v2
+- uses: amulya-labs/gha-opencache@v3
   with:
     path: .venv
     key: poetry-${{ hashFiles('poetry.lock') }}
-    base: /srv/gha-cache  # ← REQUIRED!
 ```
 
-**Root cause:** Without `base` parameter, the action uses default cache location which may not be shared.
+**Root cause:** Cache directory doesn't exist or has incorrect permissions.
 
 ---
 
@@ -1188,16 +1207,15 @@ If cache always misses ("Cache not found" in logs), check:
    sudo chmod 755 /srv/gha-cache
    ```
 
-3. **Workflow has `base` parameter:**
+3. **Workflow uses gha-opencache:**
    ```yaml
-   - uses: corca-ai/local-cache@v2
+   - uses: amulya-labs/gha-opencache@v3
      with:
        path: .venv
        key: poetry-${{ hashFiles('poetry.lock') }}
-       base: /srv/gha-cache  # Required!
    ```
 
-Without `base: /srv/gha-cache`, the action falls back to the default cache directory (for example `$XDG_CACHE_HOME` or `$HOME/.cache`), which in this runner setup may not exist or may not be shared between runners.
+See [gha-opencache](https://github.com/amulya-labs/gha-opencache) for backend configuration options.
 
 **Debug container issues:**
 ```bash
@@ -1452,9 +1470,9 @@ See the [Using Service Containers](#using-service-containers) section for exampl
 **Q: Why is my cache always missing?**
 
 A: Check three things:
-1. **Shared cache directory exists**: `ls -la /srv/gha-cache/`
-2. **Workflow has base parameter**: `base: /srv/gha-cache`
-3. **Cache key matches**: Check for typos in your cache key
+1. **Shared cache directory/backing store exists**: Verify the directory (e.g., `ls -la /srv/gha-cache/`) or your configured backend storage is accessible
+2. **gha-opencache step is configured correctly**: Ensure your workflow uses `gha-opencache@v3` with the right `path` and `key` inputs for your environment
+3. **Cache key matches**: Check for typos or unexpected changes in your cache key so restore and save steps use the same value
 
 See [Cache Not Working](#cache-not-working) in Troubleshooting.
 
@@ -1497,7 +1515,7 @@ A: By default, no. Workflows run with limited permissions:
 
 A: Typically:
 - **GitHub cloud cache**: 10-60 seconds restore time
-- **Local cache** (corca-ai/local-cache): Sub-second (often <100ms)
+- **Local cache** (gha-opencache): Sub-second (often <100ms)
 
 The speed difference compounds across multiple cache operations per workflow.
 
@@ -1547,10 +1565,32 @@ A:
 
 ---
 
+## Related Projects
+
+### gha-opencache
+
+**[gha-opencache](https://github.com/amulya-labs/gha-opencache)** is the recommended caching action for gha-runnerd. It's a drop-in replacement for `actions/cache` with:
+
+- **Pluggable backends**: Local disk, S3-compatible storage, Google Cloud Storage
+- **Sub-second restores**: No network round-trips when using local backend
+- **Configurable TTL**: Automatic cache expiration and cleanup
+- **Compression options**: Reduce storage usage with configurable compression
+
+**Quick example:**
+```yaml
+- uses: amulya-labs/gha-opencache@v3
+  with:
+    path: node_modules
+    key: npm-${{ hashFiles('package-lock.json') }}
+```
+
+See the [Caching Dependencies](#caching-dependencies) section for more examples.
+
+---
+
 ## Related Documentation
 
 - **GitHub Docs**: https://docs.github.com/en/actions/hosting-your-own-runners
-- **Corca Local Cache**: https://github.com/corca-ai/local-cache
 - **Docker Official Images**: https://hub.docker.com/_/
 
 ---

@@ -6,7 +6,7 @@
 # Philosophy: Use generic runners + containers for flexibility
 # - Runners are generic (cpu/gpu) or specialized with optional category
 # - Dependencies live in container images when possible
-# - Use corca-ai/local-cache for fast local caching
+# - Use amulya-labs/gha-opencache for fast local caching
 #
 # Naming Convention: {type}-{size}-[{category}]-{number}
 # - type = 'cpu' | 'gpu'
@@ -40,7 +40,7 @@ host:
   docker_user_uid: 1003
   docker_user_gid: 1003
 
-# Cache configuration (used by corca-ai/local-cache)
+# Cache configuration (used by amulya-labs/gha-opencache)
 cache:
   base_dir: "/srv/gha-cache"  # Shared cache directory for all runners
   permissions: "755"  # Directory permissions for cache

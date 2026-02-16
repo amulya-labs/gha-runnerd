@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Complete documentation overhaul for public launch
+- "What is this?" section with value propositions for both technical and non-technical readers
+- Visual architecture diagram showing how runners, containers, and caching work together
+- Streamlined comparison table focusing on key differentiators
 - Examples for Python, Node.js, Rust, and Docker workflows
 - Configuration examples (minimal, production, GPU-enabled)
 - Development dependencies in requirements-dev.txt
@@ -20,7 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI/CD workflows for linting and testing
 
 ### Changed
-- Improved README structure with clearer sections
+- README title changed to "gha-runnerd" with clearer tagline
+- Improved README structure with "Quick Start" prominently featured
+- Consolidated "Why gha-runnerd?" section with cleaner comparison table
 - Enhanced CLI with --list, --remove, --upgrade, and --config options
 - Better error messages and validation
 - Consolidated Prerequisites and Setup sections in documentation
@@ -38,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Automatic runner registration via GitHub CLI
 - Systemd service management
 - Resource limits via systemd (CPU, memory, PIDs)
-- Shared cache directory support for corca-ai/local-cache
+- Shared cache directory support for gha-opencache and other cache actions
 - Workspace cleanup hooks for Docker container permissions
 - Flexible runner naming with type, size, and optional category
 - Configuration validation and dry-run mode

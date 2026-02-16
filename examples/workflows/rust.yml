@@ -13,21 +13,19 @@ jobs:
     container:
       image: rust:1.75
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: Cache cargo registry
-        uses: corca-ai/local-cache@v2
+        uses: amulya-labs/gha-opencache@v3
         with:
           key: cargo-registry-${{ hashFiles('Cargo.lock') }}
           path: /usr/local/cargo/registry
-          base: /srv/gha-cache
 
       - name: Cache cargo index
-        uses: corca-ai/local-cache@v2
+        uses: amulya-labs/gha-opencache@v3
         with:
           key: cargo-index-${{ hashFiles('Cargo.lock') }}
           path: /usr/local/cargo/git
-          base: /srv/gha-cache
 
       - name: Run clippy
         run: cargo clippy -- -D warnings
@@ -41,28 +39,25 @@ jobs:
     container:
       image: rust:1.75
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: Cache cargo registry
-        uses: corca-ai/local-cache@v2
+        uses: amulya-labs/gha-opencache@v3
         with:
           key: cargo-registry-${{ hashFiles('Cargo.lock') }}
           path: /usr/local/cargo/registry
-          base: /srv/gha-cache
 
       - name: Cache cargo index
-        uses: corca-ai/local-cache@v2
+        uses: amulya-labs/gha-opencache@v3
         with:
           key: cargo-index-${{ hashFiles('Cargo.lock') }}
           path: /usr/local/cargo/git
-          base: /srv/gha-cache
 
       - name: Cache build artifacts
-        uses: corca-ai/local-cache@v2
+        uses: amulya-labs/gha-opencache@v3
         with:
           key: cargo-build-${{ hashFiles('Cargo.lock') }}
           path: target
-          base: /srv/gha-cache
 
       - name: Run tests
         run: cargo test --verbose
@@ -73,28 +68,25 @@ jobs:
     container:
       image: rust:1.75
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: Cache cargo registry
-        uses: corca-ai/local-cache@v2
+        uses: amulya-labs/gha-opencache@v3
         with:
           key: cargo-registry-${{ hashFiles('Cargo.lock') }}
           path: /usr/local/cargo/registry
-          base: /srv/gha-cache
 
       - name: Cache cargo index
-        uses: corca-ai/local-cache@v2
+        uses: amulya-labs/gha-opencache@v3
         with:
           key: cargo-index-${{ hashFiles('Cargo.lock') }}
           path: /usr/local/cargo/git
-          base: /srv/gha-cache
 
       - name: Cache build artifacts
-        uses: corca-ai/local-cache@v2
+        uses: amulya-labs/gha-opencache@v3
         with:
           key: cargo-release-${{ hashFiles('Cargo.lock') }}
           path: target
-          base: /srv/gha-cache
 
       - name: Build release
         run: cargo build --release

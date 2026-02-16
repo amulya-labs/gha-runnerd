@@ -13,14 +13,13 @@ jobs:
     container:
       image: node:20-slim
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-      - name: Cache node_modules
-        uses: corca-ai/local-cache@v2
+      - name: Cache npm
+        uses: amulya-labs/gha-opencache@v3
         with:
-          key: node-modules-${{ hashFiles('package-lock.json') }}
-          path: node_modules
-          base: /srv/gha-cache
+          key: npm-cache-${{ hashFiles('package-lock.json') }}
+          path: ~/.npm
 
       - name: Install dependencies
         run: npm ci
@@ -34,14 +33,13 @@ jobs:
     container:
       image: node:20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-      - name: Cache node_modules
-        uses: corca-ai/local-cache@v2
+      - name: Cache npm
+        uses: amulya-labs/gha-opencache@v3
         with:
-          key: node-modules-${{ hashFiles('package-lock.json') }}
-          path: node_modules
-          base: /srv/gha-cache
+          key: npm-cache-${{ hashFiles('package-lock.json') }}
+          path: ~/.npm
 
       - name: Install dependencies
         run: npm ci
@@ -55,21 +53,20 @@ jobs:
     container:
       image: node:20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-      - name: Cache node_modules
-        uses: corca-ai/local-cache@v2
+      - name: Cache npm
+        uses: amulya-labs/gha-opencache@v3
         with:
-          key: node-modules-${{ hashFiles('package-lock.json') }}
-          path: node_modules
-          base: /srv/gha-cache
+          key: npm-cache-${{ hashFiles('package-lock.json') }}
+          path: ~/.npm
 
       - name: Cache build output
-        uses: corca-ai/local-cache@v2
+        uses: amulya-labs/gha-opencache@v3
         with:
-          key: build-${{ github.sha }}
+          key: build-${{ hashFiles('package-lock.json', 'src/**') }}
+          restore-keys: build-
           path: dist
-          base: /srv/gha-cache
 
       - name: Install dependencies
         run: npm ci

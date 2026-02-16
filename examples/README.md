@@ -16,7 +16,7 @@ Example GitHub Actions workflows demonstrating best practices:
 All workflow examples demonstrate:
 
 1. **Always use containers** - Ensures consistent, reproducible environments
-2. **Local caching with corca-ai/local-cache** - Fast zero-network caching
+2. **Local caching with [gha-opencache](https://github.com/amulya-labs/gha-opencache)** - Sub-second cache restores
 3. **Size-appropriate runners** - Match runner size to workload (xs→small→medium→large)
 4. **Proper cache keys** - Use lock files for dependency caching
 
