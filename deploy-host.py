@@ -802,6 +802,13 @@ if [ -d "$WORK_DIR" ]; then
     # Fix ownership of any files not owned by the runner user
     sudo /usr/bin/chown -R {uid}:{gid} "$WORK_DIR" 2>/dev/null || true
 fi
+
+# Remove tool installations from previous container runs
+# Prevents cross-image contamination (e.g. python:3.12 Poetry crashing in python:3.11)
+HOME_LOCAL="{runner_path}/.local"
+if [ -d "$HOME_LOCAL" ]; then
+    rm -rf "$HOME_LOCAL" 2>/dev/null || true
+fi
 """
 
         # Write to /tmp first, then copy with sudo
