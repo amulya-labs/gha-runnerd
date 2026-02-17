@@ -959,7 +959,7 @@ Environment="ACTIONS_RUNNER_HOOK_JOB_STARTED={hook_path}"
 WantedBy=multi-user.target
 """
 
-        # Write service file
+        # Write service file (write to /tmp first, then copy with sudo)
         if DRY_RUN:
             log_dry_run(f"Write systemd service file to {service_path}")
             if VERBOSE:
@@ -968,7 +968,15 @@ WantedBy=multi-user.target
                     if line.strip():
                         log_debug(f"  {line}")
         else:
-            service_path.write_text(service_content)
+            temp_path = Path(f"/tmp/gha-service-{os.getpid()}.service")
+            temp_path.write_text(service_content)
+            temp_path.chmod(0o644)
+            run_cmd(
+                ["cp", str(temp_path), str(service_path)],
+                sudo=True,
+                sudo_reason=f"installing systemd service file for {service_name}"
+            )
+            temp_path.unlink()
 
         # Reload systemd, enable and start service
         log("Reloading systemd daemon...", "info")
