@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Documentation inconsistencies and duplications
 - Example file references in CONTRIBUTING.md
+- Pre-job cleanup hook now handles root-owned files in `$HOME/.local` by running `chown` before `rm -rf` (container jobs run as root, so files were previously undeletable)
+- Sudoers configuration extended to allow `chown` on `.local` directories alongside `_work`
+- Cleanup hook now logs when removing stale `$HOME/.local` for visibility in Actions job logs
 
 ## [1.0.0] - 2026-02-10
 

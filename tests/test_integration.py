@@ -338,6 +338,125 @@ class TestRunnerValidation(unittest.TestCase):
             _ = runner.size_config  # This should trigger validation
 
 
+class TestCleanupHook(unittest.TestCase):
+    """Test pre-job cleanup hook content generation"""
+
+    def setUp(self):
+        """Create a HostDeployer with a valid config"""
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "test-config.yml"
+        config = {
+            'github': {'org': 'test-org', 'prefix': 'test'},
+            'host': {
+                'runner_base': '/srv/gha',
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
+                'label': 'test-host'
+            },
+            'cache': {'base_dir': '/srv/gha-cache', 'permissions': '755'},
+            'runners': ['cpu-small-1'],
+            'sizes': {'small': {'cpus': 2.0, 'mem_limit': '4g'}},
+            'runner': {'version': '2.321.0', 'arch': 'linux-x64'}
+        }
+        with open(self.config_file, 'w') as f:
+            yaml.dump(config, f)
+        self.deployer = HostDeployer(config_path=str(self.config_file))
+        self.runner = self.deployer.runners[0]
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_hook_contains_workspace_chown(self):
+        """Test that hook fixes ownership of _work directory"""
+        content = self.deployer.generate_hook_content(self.runner)
+        self.assertIn('sudo /usr/bin/chown -R 1003:1003 "$WORK_DIR"', content)
+
+    def test_hook_contains_local_chown_before_rm(self):
+        """Test that hook fixes .local ownership before rm -rf (root-owned files from containers)"""
+        content = self.deployer.generate_hook_content(self.runner)
+        # chown must appear before rm -rf for .local
+        chown_pos = content.index('chown -R 1003:1003 "$HOME_LOCAL"')
+        rm_pos = content.index('rm -rf "$HOME_LOCAL"')
+        self.assertLess(chown_pos, rm_pos,
+                        "chown of .local must run before rm -rf to handle root-owned files")
+
+    def test_hook_contains_logging(self):
+        """Test that hook logs when cleaning .local"""
+        content = self.deployer.generate_hook_content(self.runner)
+        self.assertIn('echo "[cleanup-hook]', content)
+
+    def test_hook_contains_correct_paths(self):
+        """Test that hook uses correct runner-specific paths"""
+        content = self.deployer.generate_hook_content(self.runner)
+        runner_path = self.runner.runner_path
+        self.assertIn(f'WORK_DIR="{runner_path}/_work"', content)
+        self.assertIn(f'HOME_LOCAL="{runner_path}/.local"', content)
+
+    def test_hook_is_bash_script(self):
+        """Test that hook starts with bash shebang"""
+        content = self.deployer.generate_hook_content(self.runner)
+        self.assertTrue(content.startswith('#!/bin/bash'))
+
+    def test_hook_suppresses_errors(self):
+        """Test that hook operations are fault-tolerant (won't fail the job)"""
+        content = self.deployer.generate_hook_content(self.runner)
+        # All sudo/rm operations should suppress errors
+        self.assertEqual(content.count('2>/dev/null || true'), 3,
+                         "Expected 3 fault-tolerant operations: workspace chown, .local chown, .local rm")
+
+
+class TestSudoersContent(unittest.TestCase):
+    """Test sudoers configuration content generation"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "test-config.yml"
+        config = {
+            'github': {'org': 'test-org', 'prefix': 'test'},
+            'host': {
+                'runner_base': '/srv/gha',
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
+                'label': 'test-host'
+            },
+            'cache': {'base_dir': '/srv/gha-cache', 'permissions': '755'},
+            'runners': ['cpu-small-1'],
+            'sizes': {'small': {'cpus': 2.0, 'mem_limit': '4g'}},
+            'runner': {'version': '2.321.0', 'arch': 'linux-x64'}
+        }
+        with open(self.config_file, 'w') as f:
+            yaml.dump(config, f)
+        self.deployer = HostDeployer(config_path=str(self.config_file))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_sudoers_allows_work_chown(self):
+        """Test that sudoers allows chown on _work directories"""
+        content = self.deployer.generate_sudoers_content()
+        self.assertIn('/srv/gha/*/_work', content)
+
+    def test_sudoers_allows_local_chown(self):
+        """Test that sudoers allows chown on .local directories"""
+        content = self.deployer.generate_sudoers_content()
+        self.assertIn('/srv/gha/*/.local', content)
+
+    def test_sudoers_uses_correct_uid_gid(self):
+        """Test that sudoers references the configured uid:gid"""
+        content = self.deployer.generate_sudoers_content()
+        self.assertIn('#1003 ALL=(root) NOPASSWD:', content)
+        self.assertIn('chown -R 1003\\:1003', content)
+
+    def test_sudoers_disables_requiretty(self):
+        """Test that sudoers disables requiretty for the runner user"""
+        content = self.deployer.generate_sudoers_content()
+        self.assertIn('Defaults:#1003 !requiretty', content)
+
+
 class TestConfigDefaults(unittest.TestCase):
     """Test that config defaults are applied correctly"""
 

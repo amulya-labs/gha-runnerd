@@ -39,3 +39,6 @@ config.yml
 # OS
 .DS_Store
 Thumbs.db
+
+# Ignore local config
+config.yml
