@@ -1065,6 +1065,10 @@ WantedBy=multi-user.target
 
     def print_summary(self):
         """Print deployment summary"""
+        org = self.config['github']['org']
+        settings_url = f"https://github.com/organizations/{org}/settings/actions/runners"
+        removed = getattr(self, '_removed_runners', [])
+
         log("\n" + "="*60, "header")
         if DRY_RUN:
             log("DRY-RUN COMPLETE - No changes were made", "header")
@@ -1072,35 +1076,107 @@ WantedBy=multi-user.target
             log("DEPLOYMENT COMPLETE", "header")
         log("="*60, "header")
 
-        org = self.config['github']['org']
-        settings_url = f"https://github.com/organizations/{org}/settings/actions/runners"
+        # Removed runners
+        if removed:
+            log(f"\nRemoved {len(removed)} runner(s):", "warning")
+            for name in removed:
+                log(f"  - {name} (deregistered from GitHub + local cleanup)", "warning")
 
+        # Deployed runners
         if DRY_RUN:
             log(f"\nWould deploy {len(self.runners)} runner(s):", "info")
         else:
-            log(f"\nRunners: {settings_url}", "info")
             log(f"\nDeployed {len(self.runners)} runner(s):", "info")
 
         for runner in self.runners:
-            log(f"  • {runner.registered_name} ({runner.parsed['type']}, {runner.parsed['size']})", "info")
+            log(f"  + {runner.registered_name} ({runner.parsed['type']}, {runner.parsed['size']})", "success")
             log(f"    Service: {runner.service_name}.service", "info")
-            log(f"    Path: {runner.runner_path}", "info")
+            log(f"    Path:    {runner.runner_path}", "info")
             if runner.size_config.get('cpus'):
                 log(f"    Resources: {runner.size_config['cpus']} CPUs, {runner.size_config.get('mem_limit', 'unlimited')} RAM", "info")
 
+        # Final state
+        log(f"\nFinal state: {len(self.runners)} active runner(s)", "info")
+        log(f"GitHub:  {settings_url}", "info")
+
         if DRY_RUN:
-            log("\n💡 This was a dry-run. To deploy for real, run without --dry-run:", "info")
-            log("   sudo -E ./deploy-host.py", "info")
+            log("\nThis was a dry-run. To deploy for real, run without --dry-run:", "info")
+            log("   ./deploy-host.py", "info")
         else:
-            log("\nManagement commands:", "info")
-            log("  • Check status: sudo systemctl status gha-*", "info")
-            log("  • View logs: sudo journalctl -u gha-* -f", "info")
-            log("  • Restart runner: sudo systemctl restart gha-<name>", "info")
+            log("\nManagement:", "info")
+            log("  Check status:   sudo systemctl status gha-*", "info")
+            log("  View logs:      sudo journalctl -u gha-* -f", "info")
+            log("  Restart runner: sudo systemctl restart gha-<name>", "info")
 
         log("\n" + "="*60 + "\n", "header")
 
+    def _deregister_runner_from_github(self, runner_name, runner_path):
+        """Deregister a runner from GitHub before local removal.
+
+        Tries config.sh remove first (clean deregistration), then falls back
+        to the GitHub API if the runner directory or binary is missing.
+        """
+        token = os.environ.get("REGISTER_GITHUB_RUNNER_TOKEN")
+        org = self.config['github']['org']
+        uid = self.config['host']['docker_user_uid']
+        registered_name = f"{self.config['github']['prefix']}-linux-{runner_name}"
+        config_script = runner_path / "config.sh"
+
+        # Try config.sh remove first (cleanest approach)
+        if token and config_script.exists():
+            log(f"Deregistering {registered_name} from GitHub via config.sh...", "info")
+            remove_cmd = [
+                str(config_script), "remove", "--token", token
+            ]
+            try:
+                run_cmd(
+                    ["sudo", "-u", f"#{uid}", "bash", "-c",
+                     f"cd {shlex.quote(str(runner_path))} && {' '.join(shlex.quote(arg) for arg in remove_cmd)}"],
+                    check=False
+                )
+                log(f"Deregistered {registered_name} from GitHub", "success")
+                return True
+            except Exception:
+                log(f"config.sh remove failed, trying GitHub API fallback...", "warning")
+
+        # Fallback: remove via GitHub API
+        log(f"Deregistering {registered_name} from GitHub via API...", "info")
+        try:
+            # Look up runner ID by name
+            sudo_user = os.environ.get('SUDO_USER')
+            gh_prefix = []
+            if sudo_user and os.geteuid() == 0:
+                gh_prefix = ["sudo", "-u", sudo_user]
+
+            result = run_cmd(
+                gh_prefix + ["gh", "api", f"/orgs/{org}/actions/runners",
+                             "--paginate", "--jq",
+                             f'.runners[] | select(.name == "{registered_name}") | .id'],
+                capture=True,
+                check=False
+            )
+            runner_id = result.stdout.strip()
+
+            if runner_id:
+                run_cmd(
+                    gh_prefix + ["gh", "api", "-X", "DELETE",
+                                 f"/orgs/{org}/actions/runners/{runner_id}"],
+                    check=False
+                )
+                log(f"Deregistered {registered_name} (ID: {runner_id}) from GitHub", "success")
+                return True
+            else:
+                log(f"Runner {registered_name} not found on GitHub (may already be removed)", "info")
+                return True
+
+        except Exception as e:
+            log(f"Failed to deregister {registered_name} from GitHub: {e}", "warning")
+            log(f"  You may need to manually remove it from:", "warning")
+            log(f"  https://github.com/organizations/{org}/settings/actions/runners", "warning")
+            return False
+
     def cleanup_removed_runners(self):
-        """Remove runners that are no longer in config"""
+        """Remove runners that are no longer in config (local + GitHub)"""
         log("\nChecking for runners to remove...", "info")
 
         prefix = self.config['github']['prefix']
@@ -1117,7 +1193,7 @@ WantedBy=multi-user.target
             check=False
         )
 
-        removed_count = 0
+        self._removed_runners = []
         for line in result.stdout.splitlines():
             if not line.strip():
                 continue
@@ -1132,12 +1208,13 @@ WantedBy=multi-user.target
 
             # If this runner is no longer in config, remove it
             if runner_name not in configured_names:
-                log(f"\n>>> Removing runner: {runner_name}", "warning")
+                registered_name = f"{prefix}-linux-{runner_name}"
+                log(f"\n>>> Removing runner: {registered_name} (not in config)", "warning")
                 service_name = f"{service_pattern}{runner_name}.service"
                 runner_path = Path(f"{self.config['host']['runner_base']}/{prefix}-linux-{runner_name}")
 
-                # Stop and disable service
-                log(f"Stopping service {service_name}...", "info")
+                # 1. Stop and disable systemd service
+                log(f"  Stopping service {service_name}...", "info")
                 run_cmd(
                     ["systemctl", "stop", service_name],
                     sudo=True,
@@ -1145,7 +1222,7 @@ WantedBy=multi-user.target
                     check=False
                 )
 
-                log(f"Disabling service {service_name}...", "info")
+                log(f"  Disabling service {service_name}...", "info")
                 run_cmd(
                     ["systemctl", "disable", service_name],
                     sudo=True,
@@ -1153,39 +1230,42 @@ WantedBy=multi-user.target
                     check=False
                 )
 
-                # Remove service file
+                # 2. Deregister from GitHub (before removing directory)
+                self._deregister_runner_from_github(runner_name, runner_path)
+
+                # 3. Remove service file
                 service_path = Path(f"/etc/systemd/system/{service_name}")
                 if service_path.exists():
-                    log(f"Removing service file {service_path}...", "info")
+                    log(f"  Removing service file {service_path}...", "info")
                     run_cmd(
                         ["rm", str(service_path)],
                         sudo=True,
                         sudo_reason=f"removing systemd service file"
                     )
 
-                # Reload systemd
+                # 4. Reload systemd
                 run_cmd(
                     ["systemctl", "daemon-reload"],
                     sudo=True,
                     sudo_reason="reloading systemd after removing service"
                 )
 
-                # Remove runner directory
+                # 5. Remove runner directory
                 if runner_path.exists():
-                    log(f"Removing runner directory {runner_path}...", "info")
+                    log(f"  Removing runner directory {runner_path}...", "info")
                     run_cmd(
                         ["rm", "-rf", str(runner_path)],
                         sudo=True,
                         sudo_reason=f"removing runner directory {runner_path}"
                     )
 
-                log(f"Runner {runner_name} removed successfully", "success")
-                removed_count += 1
+                log(f"  Runner {registered_name} fully removed", "success")
+                self._removed_runners.append(registered_name)
 
-        if removed_count == 0:
+        if not self._removed_runners:
             log("No runners to remove", "info")
         else:
-            log(f"\nRemoved {removed_count} runner(s)", "success")
+            log(f"\nRemoved {len(self._removed_runners)} runner(s)", "success")
 
     def list_runners(self):
         """List all deployed runners with their status"""
@@ -1296,7 +1376,7 @@ WantedBy=multi-user.target
             log(f"Runner '{runner_name}' not found", "error")
             return False
         
-        # Stop service
+        # 1. Stop and disable service
         log(f"Stopping service {service_name}...", "info")
         run_cmd(
             ["systemctl", "stop", service_name],
@@ -1304,8 +1384,7 @@ WantedBy=multi-user.target
             sudo_reason=f"stopping runner service {service_name}",
             check=False
         )
-        
-        # Disable service
+
         log(f"Disabling service {service_name}...", "info")
         run_cmd(
             ["systemctl", "disable", service_name],
@@ -1313,8 +1392,11 @@ WantedBy=multi-user.target
             sudo_reason=f"disabling runner service {service_name}",
             check=False
         )
-        
-        # Remove service file
+
+        # 2. Deregister from GitHub (before removing directory)
+        self._deregister_runner_from_github(runner_name, runner_path)
+
+        # 3. Remove service file
         service_path = Path(f"/etc/systemd/system/{service_name}")
         if service_path.exists():
             log(f"Removing service file {service_path}...", "info")
@@ -1323,15 +1405,15 @@ WantedBy=multi-user.target
                 sudo=True,
                 sudo_reason=f"removing systemd service file"
             )
-        
-        # Reload systemd
+
+        # 4. Reload systemd
         run_cmd(
             ["systemctl", "daemon-reload"],
             sudo=True,
             sudo_reason="reloading systemd after removing service"
         )
-        
-        # Remove runner directory
+
+        # 5. Remove runner directory
         if runner_path.exists():
             log(f"Removing runner directory {runner_path}...", "info")
             run_cmd(
@@ -1339,8 +1421,9 @@ WantedBy=multi-user.target
                 sudo=True,
                 sudo_reason=f"removing runner directory {runner_path}"
             )
-        
-        log(f"\n✅ Runner '{runner_name}' removed successfully", "success")
+
+        registered_name = f"{prefix}-linux-{runner_name}"
+        log(f"\nRunner '{registered_name}' fully removed (GitHub + local)", "success")
         return True
 
     def upgrade_runners(self):
