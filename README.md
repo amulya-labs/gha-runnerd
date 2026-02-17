@@ -1065,11 +1065,26 @@ ls -la /srv/gha/{runner-name}/cleanup-workspace.sh
 sudo cat /etc/sudoers.d/gha-runner-cleanup
 ```
 
-**Root cause:** Docker containers run as root by default, creating files the runner user can't delete. The cleanup hook fixes this before each job.
+**Root cause:** Docker containers run as root by default, creating files the runner user can't delete. The cleanup hook fixes workspace permissions and removes stale tool installations from `$HOME/.local` before each job.
 
 ---
 
-#### 7. Cache Not Working
+#### 7. Tools Crash with "cannot open shared object file"
+
+**Symptom:** Poetry, pip, or other tools crash with `error while loading shared libraries: libpythonX.Y.so.1.0: cannot open shared object file`
+
+**Solution:** Re-deploy to install the updated cleanup hook:
+```bash
+./deploy-host.py
+```
+
+**Root cause:** When container jobs with different base images (e.g., `python:3.12` and `python:3.11`) run on the same runner, tools installed to `$HOME/.local/` persist and reference shared libraries from the previous container. The cleanup hook removes `$HOME/.local` before each job to prevent this cross-container contamination.
+
+**Optimization:** If the ~8s reinstall overhead becomes a concern for heavier toolchains, workflows can layer explicit caching of `$HOME/.local` via `gha-opencache` with image-aware keys (e.g., `home-local-${{ matrix.container }}-${{ hashFiles('requirements.txt') }}`). The hook cleanup remains as defense-in-depth.
+
+---
+
+#### 8. Cache Not Working
 
 **Symptom:** "Cache not found" in every workflow run
 
@@ -1167,6 +1182,7 @@ sudo rm -rf /srv/gha/*/_work/*  # CAREFUL: Deletes all workspaces
 | gh not authenticated | `gh auth login` |
 | Permission denied on `/srv/gha` | `sudo chown -R 1003:1003 /srv/gha` |
 | Workspace permission denied (EACCES) | Re-deploy to install cleanup hook |
+| Tools crash with "cannot open shared object file" | Re-deploy to install updated cleanup hook |
 | Service won't start | `sudo journalctl -u gha-<service> -n 100` |
 | Runner not in GitHub | Check token, re-run `./deploy-host.py` |
 | GPU not accessible | Install NVIDIA drivers + Container Toolkit |
@@ -1180,15 +1196,15 @@ sudo rm -rf /srv/gha/*/_work/*  # CAREFUL: Deletes all workspaces
 
 When Docker containers run as root (the default), they can create files that the runner user (`ci-docker`) cannot delete. This causes `EACCES: permission denied` errors during checkout.
 
-**Solution:** The deploy script installs a pre-job cleanup hook that automatically fixes workspace permissions before each job. If you see this error, re-deploy:
+**Solution:** The deploy script installs a pre-job cleanup hook that automatically fixes workspace permissions and removes stale tool installations before each job. If you see this error, re-deploy:
 
 ```bash
 ./deploy-host.py
 ```
 
 This creates:
-- `/srv/gha/{runner}/cleanup-workspace.sh` - runs before each job
-- `/etc/sudoers.d/gha-runner-cleanup` - allows runner to fix permissions
+- `/srv/gha/{runner}/cleanup-workspace.sh` - runs before each job, fixes `_work/` ownership and removes `$HOME/.local/` to prevent cross-container tool contamination
+- `/etc/sudoers.d/gha-runner-cleanup` - allows runner to `chown` workspace and `.local` directories
 
 ### Cache Not Working
 

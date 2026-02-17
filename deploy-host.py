@@ -781,20 +781,18 @@ class HostDeployer:
             if file_path.exists():
                 file_path.unlink()
 
-    def create_cleanup_hook(self, runner: RunnerConfig):
-        """Create a pre-job cleanup script that fixes workspace permissions"""
+    def generate_hook_content(self, runner: RunnerConfig):
+        """Generate the pre-job cleanup hook script content"""
         runner_path = Path(runner.runner_path)
-        hook_path = runner_path / "cleanup-workspace.sh"
         work_path = runner_path / "_work"
 
         uid = self.config['host']['docker_user_uid']
         gid = self.config['host']['docker_user_gid']
 
-        log(f"Creating cleanup hook for {runner.registered_name}...", "info")
-
-        hook_content = f"""#!/bin/bash
+        return f"""#!/bin/bash
 # Pre-job cleanup hook for GitHub Actions runner
-# Fixes workspace permissions before each job to handle root-owned files from Docker
+# 1. Fixes workspace permissions to handle root-owned files from Docker
+# 2. Removes stale tool installations to prevent cross-container contamination
 
 WORK_DIR="{work_path}"
 
@@ -807,9 +805,24 @@ fi
 # Prevents cross-image contamination (e.g. python:3.12 Poetry crashing in python:3.11)
 HOME_LOCAL="{runner_path}/.local"
 if [ -d "$HOME_LOCAL" ]; then
+    echo "[cleanup-hook] Removing stale $HOME_LOCAL from previous container run"
+    # Container jobs run as root, so files may be root-owned — fix ownership first
+    sudo /usr/bin/chown -R {uid}:{gid} "$HOME_LOCAL" 2>/dev/null || true
     rm -rf "$HOME_LOCAL" 2>/dev/null || true
 fi
 """
+
+    def create_cleanup_hook(self, runner: RunnerConfig):
+        """Create a pre-job cleanup script that fixes workspace permissions and removes stale tool installations"""
+        runner_path = Path(runner.runner_path)
+        hook_path = runner_path / "cleanup-workspace.sh"
+
+        uid = self.config['host']['docker_user_uid']
+        gid = self.config['host']['docker_user_gid']
+
+        log(f"Creating cleanup hook for {runner.registered_name}...", "info")
+
+        hook_content = self.generate_hook_content(runner)
 
         # Write to /tmp first, then copy with sudo
         temp_path = Path(f"/tmp/cleanup-workspace-{os.getpid()}.sh")
@@ -835,21 +848,25 @@ fi
 
         log(f"Cleanup hook created at {hook_path}", "success")
 
-    def configure_sudoers(self):
-        """Configure sudoers to allow runner user to fix workspace permissions"""
+    def generate_sudoers_content(self):
+        """Generate the sudoers configuration content"""
         uid = self.config['host']['docker_user_uid']
         gid = self.config['host']['docker_user_gid']
         base = self.config['host']['runner_base']
+
+        return f"""# Allow GitHub Actions runner user to fix workspace and tool installation permissions
+# Managed by deploy-host.py - do not edit manually
+Defaults:#{uid} !requiretty
+#{uid} ALL=(root) NOPASSWD: /usr/bin/chown -R {uid}\\:{gid} {base}/*/_work, /usr/bin/chown -R {uid}\\:{gid} {base}/*/_work/*, /usr/bin/chown -R {uid}\\:{gid} {base}/*/.local
+"""
+
+    def configure_sudoers(self):
+        """Configure sudoers to allow runner user to fix workspace and tool installation permissions"""
         sudoers_path = Path(self.config['sudoers']['path'])
 
         log("Configuring sudoers for workspace cleanup...", "info")
 
-        # Allow the runner user to run chown on the runner base directory without password
-        sudoers_content = f"""# Allow GitHub Actions runner user to fix workspace permissions
-# Managed by deploy-host.py - do not edit manually
-Defaults:#{uid} !requiretty
-#{uid} ALL=(root) NOPASSWD: /usr/bin/chown -R {uid}\\:{gid} {base}/*/_work, /usr/bin/chown -R {uid}\\:{gid} {base}/*/_work/*
-"""
+        sudoers_content = self.generate_sudoers_content()
 
         # Write to /tmp first (user-writable), then move with sudo
         temp_path = Path(f"/tmp/gha-runner-cleanup-{os.getpid()}.sudoers")
