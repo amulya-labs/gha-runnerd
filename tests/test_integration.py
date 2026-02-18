@@ -373,14 +373,39 @@ class TestCleanupHook(unittest.TestCase):
         content = self.deployer.generate_hook_content(self.runner)
         self.assertIn('sudo /usr/bin/chown -R 1003:1003 "$WORK_DIR"', content)
 
-    def test_hook_contains_local_chown_before_rm(self):
-        """Test that hook fixes .local ownership before rm -rf (root-owned files from containers)"""
+    def test_hook_cleans_container_home_local(self):
+        """Test that hook cleans .local from the container HOME path (_work/_temp/_github_home)"""
+        content = self.deployer.generate_hook_content(self.runner)
+        runner_path = self.runner.runner_path
+        # Container jobs map _work/_temp/_github_home -> /github/home
+        self.assertIn(f'CONTAINER_HOME_LOCAL="{runner_path}/_work/_temp/_github_home/.local"', content)
+        self.assertIn('rm -rf "$CONTAINER_HOME_LOCAL"', content)
+
+    def test_hook_cleans_host_home_local(self):
+        """Test that hook also cleans .local at runner root for non-container jobs"""
+        content = self.deployer.generate_hook_content(self.runner)
+        runner_path = self.runner.runner_path
+        self.assertIn(f'HOME_LOCAL="{runner_path}/.local"', content)
+        self.assertIn('rm -rf "$HOME_LOCAL"', content)
+
+    def test_hook_chown_before_rm_for_host_local(self):
+        """Test that hook fixes .local ownership before rm -rf for host (non-container) path"""
         content = self.deployer.generate_hook_content(self.runner)
         # chown must appear before rm -rf for .local
         chown_pos = content.index('chown -R 1003:1003 "$HOME_LOCAL"')
         rm_pos = content.index('rm -rf "$HOME_LOCAL"')
         self.assertLess(chown_pos, rm_pos,
                         "chown of .local must run before rm -rf to handle root-owned files")
+
+    def test_hook_workspace_chown_before_container_local_rm(self):
+        """Test that workspace chown runs before container .local rm (fixes ownership of _work tree)"""
+        content = self.deployer.generate_hook_content(self.runner)
+        # The workspace chown -R covers _work/_temp/_github_home/.local,
+        # so it must run before the rm -rf of that path
+        workspace_chown_pos = content.index('chown -R 1003:1003 "$WORK_DIR"')
+        container_rm_pos = content.index('rm -rf "$CONTAINER_HOME_LOCAL"')
+        self.assertLess(workspace_chown_pos, container_rm_pos,
+                        "workspace chown must run before container .local rm")
 
     def test_hook_contains_logging(self):
         """Test that hook logs when cleaning .local"""
@@ -392,6 +417,7 @@ class TestCleanupHook(unittest.TestCase):
         content = self.deployer.generate_hook_content(self.runner)
         runner_path = self.runner.runner_path
         self.assertIn(f'WORK_DIR="{runner_path}/_work"', content)
+        self.assertIn(f'CONTAINER_HOME_LOCAL="{runner_path}/_work/_temp/_github_home/.local"', content)
         self.assertIn(f'HOME_LOCAL="{runner_path}/.local"', content)
 
     def test_hook_is_bash_script(self):
@@ -402,9 +428,11 @@ class TestCleanupHook(unittest.TestCase):
     def test_hook_suppresses_errors(self):
         """Test that hook operations are fault-tolerant (won't fail the job)"""
         content = self.deployer.generate_hook_content(self.runner)
-        # All sudo/rm operations should suppress errors
-        self.assertEqual(content.count('2>/dev/null || true'), 3,
-                         "Expected 3 fault-tolerant operations: workspace chown, .local chown, .local rm")
+        # All sudo/rm operations should suppress errors:
+        # 1. workspace chown, 2. container .local rm, 3. host .local chown, 4. host .local rm
+        self.assertEqual(content.count('2>/dev/null || true'), 4,
+                         "Expected 4 fault-tolerant operations: workspace chown, "
+                         "container .local rm, host .local chown, host .local rm")
 
 
 class TestSudoersContent(unittest.TestCase):

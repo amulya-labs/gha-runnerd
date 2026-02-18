@@ -789,6 +789,13 @@ class HostDeployer:
         uid = self.config['host']['docker_user_uid']
         gid = self.config['host']['docker_user_gid']
 
+        # The GitHub Actions runner bind-mounts _work/_temp/_github_home as
+        # /github/home inside containers (HOME=/github/home).  Tool installers
+        # like Poetry write to $HOME/.local, so the stale venv lives at:
+        #   {runner_path}/_work/_temp/_github_home/.local   (container jobs)
+        # We also clean {runner_path}/.local for non-container (host) jobs.
+        container_home = f"{work_path}/_temp/_github_home"
+
         return f"""#!/bin/bash
 # Pre-job cleanup hook for GitHub Actions runner
 # 1. Fixes workspace permissions to handle root-owned files from Docker
@@ -803,10 +810,20 @@ fi
 
 # Remove tool installations from previous container runs
 # Prevents cross-image contamination (e.g. python:3.12 Poetry crashing in python:3.11)
+#
+# Container jobs: the runner maps _work/_temp/_github_home -> /github/home
+# inside the Docker container, so $HOME/.local lands there on the host.
+CONTAINER_HOME_LOCAL="{container_home}/.local"
+if [ -d "$CONTAINER_HOME_LOCAL" ]; then
+    echo "[cleanup-hook] Removing stale $CONTAINER_HOME_LOCAL from previous container run"
+    # Ownership already fixed by the _work chown above
+    rm -rf "$CONTAINER_HOME_LOCAL" 2>/dev/null || true
+fi
+
+# Non-container (host) jobs: HOME is {runner_path}, so .local is here
 HOME_LOCAL="{runner_path}/.local"
 if [ -d "$HOME_LOCAL" ]; then
-    echo "[cleanup-hook] Removing stale $HOME_LOCAL from previous container run"
-    # Container jobs run as root, so files may be root-owned — fix ownership first
+    echo "[cleanup-hook] Removing stale $HOME_LOCAL from previous run"
     sudo /usr/bin/chown -R {uid}:{gid} "$HOME_LOCAL" 2>/dev/null || true
     rm -rf "$HOME_LOCAL" 2>/dev/null || true
 fi
