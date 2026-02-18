@@ -12,6 +12,8 @@ import unittest
 import tempfile
 import os
 import sys
+import re
+from fnmatch import fnmatch
 from pathlib import Path
 
 # Add parent directory to path to import deploy-host module
@@ -483,6 +485,203 @@ class TestSudoersContent(unittest.TestCase):
         """Test that sudoers disables requiretty for the runner user"""
         content = self.deployer.generate_sudoers_content()
         self.assertIn('Defaults:#1003 !requiretty', content)
+
+
+class TestHookSudoersConsistency(unittest.TestCase):
+    """P0: Cross-validate that sudo commands in the hook are permitted by sudoers rules.
+
+    The hook generates sudo commands; the sudoers generates NOPASSWD rules.
+    If these drift apart, the hook silently fails (because of || true).
+    These tests ensure the two stay in sync.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "test-config.yml"
+        config = {
+            'github': {'org': 'test-org', 'prefix': 'test'},
+            'host': {
+                'runner_base': '/srv/gha',
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
+                'label': 'test-host'
+            },
+            'cache': {'base_dir': '/srv/gha-cache', 'permissions': '755'},
+            'runners': ['cpu-small-1'],
+            'sizes': {'small': {'cpus': 2.0, 'mem_limit': '4g'}},
+            'runner': {'version': '2.321.0', 'arch': 'linux-x64'}
+        }
+        with open(self.config_file, 'w') as f:
+            yaml.dump(config, f)
+        self.deployer = HostDeployer(config_path=str(self.config_file))
+        self.runner = self.deployer.runners[0]
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _extract_sudoers_chown_globs(self):
+        """Extract the glob patterns from sudoers NOPASSWD chown rules."""
+        sudoers = self.deployer.generate_sudoers_content()
+        # The sudoers line looks like:
+        #   #1003 ALL=(root) NOPASSWD: /usr/bin/chown -R 1003\:1003 /srv/gha/*/_work, ...
+        # Extract each chown target path (the glob after uid:gid)
+        nopasswd_line = [l for l in sudoers.splitlines() if 'NOPASSWD' in l][0]
+        # Split on commas to get individual rules, extract the path from each
+        rules = nopasswd_line.split('NOPASSWD:')[1].split(',')
+        globs = []
+        for rule in rules:
+            rule = rule.strip()
+            # Each rule is: /usr/bin/chown -R uid\:gid <path>
+            parts = rule.rsplit(' ', 1)
+            if len(parts) == 2:
+                globs.append(parts[1])
+        return globs
+
+    def test_sudoers_covers_workspace_chown_command(self):
+        """Test that the workspace chown in the hook is permitted by sudoers"""
+        hook = self.deployer.generate_hook_content(self.runner)
+        globs = self._extract_sudoers_chown_globs()
+
+        # Extract WORK_DIR path from hook
+        match = re.search(r'WORK_DIR="([^"]+)"', hook)
+        work_dir = match.group(1)
+
+        # The workspace path must match at least one sudoers glob
+        self.assertTrue(
+            any(fnmatch(work_dir, g) for g in globs),
+            f"Hook workspace path '{work_dir}' not covered by sudoers globs: {globs}"
+        )
+
+    def test_sudoers_covers_host_local_chown_command(self):
+        """Test that the host .local chown in the hook is permitted by sudoers"""
+        hook = self.deployer.generate_hook_content(self.runner)
+        globs = self._extract_sudoers_chown_globs()
+
+        # Extract HOME_LOCAL path from hook
+        match = re.search(r'HOME_LOCAL="([^"]+)"', hook)
+        home_local = match.group(1)
+
+        # The .local path must match at least one sudoers glob
+        self.assertTrue(
+            any(fnmatch(home_local, g) for g in globs),
+            f"Hook host .local path '{home_local}' not covered by sudoers globs: {globs}"
+        )
+
+    def test_container_home_local_is_under_work_dir(self):
+        """Test that container .local is under _work/ so workspace chown covers it.
+
+        The container .local does NOT get its own sudo chown — it relies on
+        the recursive workspace chown. If this invariant breaks, the container
+        .local rm will silently fail on root-owned files.
+        """
+        hook = self.deployer.generate_hook_content(self.runner)
+
+        work_dir = re.search(r'WORK_DIR="([^"]+)"', hook).group(1)
+        container_local = re.search(r'CONTAINER_HOME_LOCAL="([^"]+)"', hook).group(1)
+
+        self.assertTrue(
+            container_local.startswith(work_dir + "/"),
+            f"Container .local '{container_local}' is not under work dir '{work_dir}' — "
+            f"it needs its own sudo chown or the workspace chown won't cover it"
+        )
+
+
+class TestAsymmetricUidGid(unittest.TestCase):
+    """P1: Test that uid and gid are not accidentally swapped or duplicated."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "test-config.yml"
+        config = {
+            'github': {'org': 'test-org', 'prefix': 'test'},
+            'host': {
+                'runner_base': '/srv/gha',
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1001,
+                'docker_user_gid': 1002,
+                'label': 'test-host'
+            },
+            'cache': {'base_dir': '/srv/gha-cache', 'permissions': '755'},
+            'runners': ['cpu-small-1'],
+            'sizes': {'small': {'cpus': 2.0, 'mem_limit': '4g'}},
+            'runner': {'version': '2.321.0', 'arch': 'linux-x64'}
+        }
+        with open(self.config_file, 'w') as f:
+            yaml.dump(config, f)
+        self.deployer = HostDeployer(config_path=str(self.config_file))
+        self.runner = self.deployer.runners[0]
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_hook_uses_asymmetric_uid_gid(self):
+        """Test that hook uses uid:gid (not uid:uid) in chown commands"""
+        content = self.deployer.generate_hook_content(self.runner)
+        # Must use 1001:1002, not 1001:1001
+        self.assertIn('chown -R 1001:1002', content)
+        self.assertNotIn('chown -R 1001:1001', content)
+        self.assertNotIn('chown -R 1002:1002', content)
+
+    def test_sudoers_uses_asymmetric_uid_gid(self):
+        """Test that sudoers uses uid:gid and references uid for user identity"""
+        content = self.deployer.generate_sudoers_content()
+        # Sudoers escapes colons: 1001\:1002
+        self.assertIn('chown -R 1001\\:1002', content)
+        self.assertNotIn('chown -R 1001\\:1001', content)
+        # User identity uses uid, not gid
+        self.assertIn('#1001 ALL=(root)', content)
+        self.assertIn('Defaults:#1001', content)
+
+
+class TestHookSecurityGuardrails(unittest.TestCase):
+    """P1: Security guardrails for the cleanup hook."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "test-config.yml"
+        config = {
+            'github': {'org': 'test-org', 'prefix': 'test'},
+            'host': {
+                'runner_base': '/srv/gha',
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
+                'label': 'test-host'
+            },
+            'cache': {'base_dir': '/srv/gha-cache', 'permissions': '755'},
+            'runners': ['cpu-small-1'],
+            'sizes': {'small': {'cpus': 2.0, 'mem_limit': '4g'}},
+            'runner': {'version': '2.321.0', 'arch': 'linux-x64'}
+        }
+        with open(self.config_file, 'w') as f:
+            yaml.dump(config, f)
+        self.deployer = HostDeployer(config_path=str(self.config_file))
+        self.runner = self.deployer.runners[0]
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_hook_rm_does_not_use_sudo(self):
+        """Test that rm -rf is never called via sudo (chown first, then rm as runner user)"""
+        content = self.deployer.generate_hook_content(self.runner)
+        for line in content.splitlines():
+            if 'rm -rf' in line:
+                self.assertNotIn('sudo', line,
+                                 f"rm -rf must not use sudo — chown first, then rm as runner user: {line.strip()}")
+
+    def test_hook_host_local_matches_runner_path(self):
+        """Test that the hook's host HOME_LOCAL is runner_path/.local (matches systemd HOME)"""
+        content = self.deployer.generate_hook_content(self.runner)
+        # Match HOME_LOCAL= but not CONTAINER_HOME_LOCAL=
+        home_local = re.search(r'\nHOME_LOCAL="([^"]+)"', content).group(1)
+        expected = self.runner.runner_path + "/.local"
+        self.assertEqual(home_local, expected,
+                         "HOME_LOCAL must equal runner_path/.local — "
+                         "this is where systemd sets HOME, so host jobs write .local here")
 
 
 class TestConfigDefaults(unittest.TestCase):
