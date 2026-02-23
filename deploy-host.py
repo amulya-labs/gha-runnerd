@@ -1020,19 +1020,24 @@ class HostDeployer:
                 log_dry_run(f"Register runner {runner.registered_name} with GitHub")
                 log_dry_run(f"Labels: {runner.labels}")
             else:
-                try:
-                    run_cmd(
-                        ["sudo", "-u", f"#{uid}", "-g", f"#{gid}",
-                         "bash", "-c", f"cd {shlex.quote(str(runner_path))} && {' '.join(shlex.quote(arg) for arg in config_cmd)}"]
-                    )
-                except subprocess.CalledProcessError as e:
+                result = run_cmd(
+                    ["sudo", "-u", f"#{uid}", "-g", f"#{gid}",
+                     "bash", "-c", f"cd {shlex.quote(str(runner_path))} && {' '.join(shlex.quote(arg) for arg in config_cmd)}"],
+                    check=False, capture=True,
+                )
+                if result.returncode != 0:
+                    output = (result.stdout or "") + (result.stderr or "")
                     log(f"Failed to register runner {runner.registered_name}", "error")
-                    log("This usually means:", "error")
+                    if output.strip():
+                        log(f"config.sh output:\n{output.strip()}", "error")
+                    log("", "error")
+                    log("Common causes:", "error")
                     log("  • Registration token is invalid or expired", "error")
                     log("  • Token was already used (tokens are single-use)", "error")
+                    if runner_group_id:
+                        log(f"  • Runner group ID {runner_group_id} does not exist in the enterprise", "error")
                     log("  • Network connectivity issues", "error")
-                    log("\nTry fetching a fresh token and re-running", "error")
-                    raise
+                    sys.exit(1)
 
             # Save labels
             if DRY_RUN:
