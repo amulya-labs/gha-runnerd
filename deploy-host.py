@@ -127,9 +127,8 @@ def run_cmd(
     need_sudo = sudo and os.geteuid() != 0
 
     if need_sudo:
-        # Show clear message about why sudo is needed
         reason = sudo_reason or dry_run_msg or "system operation"
-        log(f"🔒 Requesting sudo access for: {reason}", "info")
+        log_debug(f"🔒 Requesting sudo access for: {reason}")
         cmd = ["sudo"] + cmd
 
     # Log command in verbose mode
