@@ -1067,11 +1067,15 @@ class HostDeployer:
         except Exception:
             log("Failed to cleanly remove runner, will force cleanup", "warning")
         
-        # Clean up config files
+        # Clean up config files (owned by runner user, need sudo)
         for f in [".runner", ".credentials", ".credentials_rsaparams", ".service", ".labels"]:
             file_path = runner_path / f
             if file_path.exists():
-                file_path.unlink()
+                run_cmd(
+                    ["rm", "-f", str(file_path)],
+                    sudo=True,
+                    sudo_reason=f"removing runner config file {f}",
+                )
 
     def generate_hook_content(self, runner: RunnerConfig):
         """Generate the pre-job cleanup hook script content"""
