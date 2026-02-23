@@ -1035,17 +1035,23 @@ class HostDeployer:
                     log("  • Network connectivity issues", "error")
                     sys.exit(1)
 
-            # Save labels
+            # Save labels (runner dir is owned by runner user, write via sudo)
             if DRY_RUN:
                 log_dry_run(f"Save labels to {labels_file}")
             else:
-                labels_file.write_text(runner.labels)
+                temp_labels = Path(f"/tmp/gha-labels-{os.getpid()}")
+                temp_labels.write_text(runner.labels)
+                run_cmd(
+                    ["cp", str(temp_labels), str(labels_file)],
+                    sudo=True,
+                    sudo_reason="saving labels file",
+                )
                 run_cmd(
                     ["chown", f"{uid}:{gid}", str(labels_file)],
                     sudo=True,
-                    sudo_reason=f"setting labels file ownership",
-                    dry_run_msg=f"Set labels file ownership"
+                    sudo_reason="setting labels file ownership",
                 )
+                temp_labels.unlink()
 
             log(f"Registered {runner.registered_name}", "success")
 
