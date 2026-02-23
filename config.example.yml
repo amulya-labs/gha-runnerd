@@ -30,8 +30,8 @@
 # GitHub settings
 # Scope determines whether runners register under an org or an enterprise.
 # - scope: org         (default) Register with a single GitHub organization
-# - scope: enterprise  Register with a GitHub Enterprise and optionally manage
-#                       runner groups + org access
+# - scope: enterprise  Register with a GitHub Enterprise and optionally assign
+#                       runners to runner groups (org access managed in GitHub UI)
 github:
   scope: "org"         # org | enterprise (default: org)
   org: "your-org"      # Required when scope=org: GitHub organization name

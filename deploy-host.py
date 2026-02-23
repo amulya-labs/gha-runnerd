@@ -413,8 +413,13 @@ class HostDeployer:
                 log("github.org is required when scope is 'org'", "error")
                 sys.exit(1)
 
-        # Apply defaults for runner_group
-        config['github'].setdefault('runner_group', {})
+        # Apply defaults and normalization for runner_group
+        runner_group = config['github'].get('runner_group')
+        if runner_group is None:
+            config['github']['runner_group'] = {}
+        elif not isinstance(runner_group, dict):
+            log("github.runner_group must be a mapping (dict) if specified.", "error")
+            sys.exit(1)
 
         return config
 
@@ -1014,10 +1019,12 @@ class HostDeployer:
                 "--replace"
             ]
 
-            # Add runner group if configured (enterprise scope)
+            # Add runner group if configured (enterprise scope only)
             runner_group_name = self.config['github'].get('runner_group', {}).get('name')
-            if runner_group_name:
+            if runner_group_name and self.scope == 'enterprise':
                 config_cmd.extend(["--runnergroup", runner_group_name])
+            elif runner_group_name and self.scope == 'org':
+                log("runner_group.name is ignored for org-scoped runners (enterprise only)", "warning")
 
             # Run as the runner user
             uid = self.config['host']['docker_user_uid']
@@ -1072,18 +1079,21 @@ class HostDeployer:
                 log_dry_run(f"Save labels to {labels_file}")
             else:
                 temp_labels = Path(f"/tmp/gha-labels-{os.getpid()}")
-                temp_labels.write_text(runner.labels)
-                run_cmd(
-                    ["cp", str(temp_labels), str(labels_file)],
-                    sudo=True,
-                    sudo_reason="saving labels file",
-                )
-                run_cmd(
-                    ["chown", f"{uid}:{gid}", str(labels_file)],
-                    sudo=True,
-                    sudo_reason="setting labels file ownership",
-                )
-                temp_labels.unlink()
+                try:
+                    temp_labels.write_text(runner.labels)
+                    run_cmd(
+                        ["cp", str(temp_labels), str(labels_file)],
+                        sudo=True,
+                        sudo_reason="saving labels file",
+                    )
+                    run_cmd(
+                        ["chown", f"{uid}:{gid}", str(labels_file)],
+                        sudo=True,
+                        sudo_reason="setting labels file ownership",
+                    )
+                finally:
+                    if temp_labels.exists():
+                        temp_labels.unlink()
 
             log(f"Registered {runner.registered_name}", "success")
 
@@ -1395,7 +1405,7 @@ WantedBy=multi-user.target
 
         for runner in self.runners:
             try:
-                cmd = gh_prefix + ["gh", "api", api_runners,
+                cmd = gh_prefix + ["gh", "api", "--paginate", api_runners,
                      "--jq", f'.runners[] | select(.name=="{runner.registered_name}") | .id']
                 result = subprocess.run(cmd, capture_output=True, text=True, check=True)
                 runner_id = result.stdout.strip()
@@ -2119,6 +2129,8 @@ Note: The script will prompt for sudo password when needed for system operations
         log("Verbose mode enabled", "debug")
     if DRY_RUN:
         log("Dry-run mode enabled - no changes will be made", "info")
+    if args.force and not args.remove:
+        log("--force has no effect without --remove", "warning")
 
     try:
         deployer = HostDeployer(config_path=args.config)

@@ -859,6 +859,22 @@ class TestEnterpriseScopeConfig(unittest.TestCase):
             deployer.config['github']['runner_group']['name'], 'my-runners'
         )
 
+    def test_runner_group_null_normalized_to_empty_dict(self):
+        """runner_group: (YAML null) is normalized to empty dict, not AttributeError"""
+        cfg = self._base_config()
+        cfg['github']['runner_group'] = None
+        self._write_config(cfg)
+        deployer = HostDeployer(config_path=str(self.config_file))
+        self.assertEqual(deployer.config['github']['runner_group'], {})
+
+    def test_runner_group_non_dict_rejected(self):
+        """runner_group set to a non-dict value (e.g. string) exits with error"""
+        cfg = self._base_config()
+        cfg['github']['runner_group'] = "not-a-dict"
+        self._write_config(cfg)
+        with self.assertRaises(SystemExit):
+            HostDeployer(config_path=str(self.config_file))
+
     def test_runner_group_allow_orgs_not_supported(self):
         """runner_group.allow_orgs is rejected by validation (manage in GitHub UI)"""
         cfg = self._base_config(
