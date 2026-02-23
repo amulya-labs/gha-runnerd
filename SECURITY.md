@@ -184,7 +184,7 @@ The cleanup hook (`cleanup-workspace.sh`) runs with sudo to fix permissions:
 Configured via systemd to prevent resource exhaustion:
 
 ```yaml
-# config.yml
+# ~/.config/gha-runnerd/config.yml
 sizes:
   medium:
     cpus: 6.0         # CPU quota (6 cores)
@@ -223,7 +223,7 @@ sudo journalctl -u gha-* -f
 
 ```bash
 # Update runner binaries
-# 1. Update version in config.yml
+# 1. Update version in ~/.config/gha-runnerd/config.yml
 # 2. Re-deploy
 sudo -E ./deploy-host.py
 

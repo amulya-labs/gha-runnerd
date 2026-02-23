@@ -30,9 +30,10 @@ pip install -r requirements.txt
 # 2. Authenticate with GitHub
 gh auth login
 
-# 3. Configure
-cp config.example.yml config.yml
-vim config.yml  # Set your org and runners
+# 3. Configure (default: ~/.config/gha-runnerd/config.yml)
+mkdir -p ~/.config/gha-runnerd
+cp config.example.yml ~/.config/gha-runnerd/config.yml
+vim ~/.config/gha-runnerd/config.yml  # Set your org and runners
 
 # 4. Deploy
 ./deploy-host.py --validate  # Check config
@@ -153,8 +154,9 @@ cd gha-runnerd
 pip install -r requirements.txt
 
 # Copy and edit configuration
-cp config.example.yml config.yml
-# Edit config.yml with your organization details
+mkdir -p ~/.config/gha-runnerd
+cp config.example.yml ~/.config/gha-runnerd/config.yml
+# Edit ~/.config/gha-runnerd/config.yml with your organization details
 ```
 
 ---
@@ -194,7 +196,7 @@ sudo systemctl status 'gha-*'
 
 ## Configuration
 
-Edit `config.yml`:
+Edit `~/.config/gha-runnerd/config.yml`:
 
 ```yaml
 github:
@@ -390,7 +392,7 @@ jobs:
         run: bazel build //...
 ```
 
-To add a specialized runner, add it to `config.yml`:
+To add a specialized runner, add it to your config:
 ```yaml
 runners:
   - "cpu-medium-1"         # Generic
@@ -565,8 +567,8 @@ This will:
 Upgrade all deployed runners to a new version:
 
 ```bash
-# 1. Update version in config.yml
-vim config.yml  # Change runner.version to new version
+# 1. Update version in config
+vim ~/.config/gha-runnerd/config.yml  # Change runner.version to new version
 
 # 2. Run upgrade
 ./deploy-host.py --upgrade
@@ -583,10 +585,10 @@ The upgrade process:
 
 ### Custom Configuration File
 
-Use a different configuration file:
+Use a different configuration file (default: `~/.config/gha-runnerd/config.yml`):
 
 ```bash
-./deploy-host.py --config custom-config.yml
+./deploy-host.py --config /path/to/config.yml
 ```
 
 Useful for:
@@ -634,7 +636,7 @@ You can combine multiple flags:
 
 **Add new runners** to your infrastructure:
 
-1. Edit `config.yml` to add runner names:
+1. Edit your config to add runner names:
    ```yaml
    runners:
      - "cpu-small-1"
@@ -657,7 +659,7 @@ You can combine multiple flags:
 
 **Remove runners** from your infrastructure:
 
-1. Edit `config.yml` to remove runner names:
+1. Edit your config to remove runner names:
    ```yaml
    runners:
      - "cpu-small-1"
@@ -682,7 +684,7 @@ You can combine multiple flags:
 
 **Change CPU/memory limits** for existing runners:
 
-1. Edit `config.yml` to update size limits:
+1. Edit your config to update size limits:
    ```yaml
    sizes:
      medium:
@@ -707,10 +709,10 @@ You can combine multiple flags:
 
 1. Check current runner version:
    ```bash
-   grep "version:" config.yml
+   grep "version:" ~/.config/gha-runnerd/config.yml
    ```
 
-2. Update version in `config.yml`:
+2. Update version in your config:
    ```yaml
    runner:
      version: "2.329.0"  # Update to new version
@@ -751,7 +753,7 @@ sudo systemctl stop gha-my-linux-cpu-small-1
 cd /srv/gha/my-linux-cpu-small-1
 mv run.sh.old run.sh
 
-# Update config.yml to old version
+# Update config to old version
 # Then restart
 sudo systemctl start gha-my-linux-cpu-small-1
 ```
@@ -824,7 +826,7 @@ ls -la /srv/gha-cache/
 
 ## Resource Limits
 
-Configured in `config.yml`, enforced via systemd:
+Configured in `~/.config/gha-runnerd/config.yml`, enforced via systemd:
 
 ```yaml
 sizes:
@@ -972,7 +974,7 @@ gh auth status
 
 **Solution:**
 1. Verify you have **admin** permissions in the GitHub organization
-2. Check organization name in `config.yml` is correct
+2. Check organization name in your config is correct
 3. Visit GitHub org settings: `https://github.com/organizations/YOUR-ORG/settings/actions/runners`
 4. Ensure you can manually create runners via the UI
 
@@ -1414,8 +1416,8 @@ A: Yes! Just ensure runner names are unique across your organization. You can:
 **Q: How do I scale my runner fleet?**
 
 A: gha-runnerd uses static runner allocation. To scale:
-1. **Vertical scaling**: Increase runner sizes in `config.yml` (small → medium → large)
-2. **Horizontal scaling**: Add more runner instances to `config.yml` (`cpu-small-1`, `cpu-small-2`, etc.)
+1. **Vertical scaling**: Increase runner sizes in your config (small → medium → large)
+2. **Horizontal scaling**: Add more runner instances to your config (`cpu-small-1`, `cpu-small-2`, etc.)
 3. **Multi-host scaling**: Deploy gha-runnerd on additional hosts with unique prefixes
 
 There's no auto-scaling. If you need dynamic scaling, consider [actions-runner-controller](https://github.com/actions/actions-runner-controller).
@@ -1433,8 +1435,8 @@ A:
 
 A: Use the `--upgrade` command:
 ```bash
-# 1. Update version in config.yml
-vim config.yml  # Change runner.version
+# 1. Update version in config
+vim ~/.config/gha-runnerd/config.yml  # Change runner.version
 
 # 2. Run upgrade
 ./deploy-host.py --upgrade

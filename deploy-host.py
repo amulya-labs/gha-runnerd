@@ -36,6 +36,20 @@ except ImportError:
 VERBOSE = False
 DRY_RUN = False
 
+# Runner config files that must be removed before re-registration and
+# preserved during binary upgrades.  The Actions runner's IsConfigured()
+# checks both .runner and .runner_migrated — all files listed here are
+# deleted atomically before config.sh runs.
+RUNNER_CONFIG_FILES = [
+    ".runner",
+    ".runner_migrated",
+    ".credentials",
+    ".credentials_migrated",
+    ".credentials_rsaparams",
+    ".credential_store",
+    ".setup_info",
+]
+
 
 class Colors:
     """ANSI color codes for terminal output"""
@@ -166,6 +180,59 @@ def check_requirements():
     log("Requirements OK", "success")
 
 
+# ---------------------------------------------------------------------------
+# Validation helpers (pure predicates, no side effects)
+# ---------------------------------------------------------------------------
+
+def is_non_negative_int(value) -> bool:
+    """int >= 0, rejects bool/float/str."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def is_positive_int(value) -> bool:
+    """int > 0, rejects bool/float/str."""
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def is_positive_number(value) -> bool:
+    """int or float > 0, rejects bool."""
+    if isinstance(value, bool):
+        return False
+    return isinstance(value, (int, float)) and value > 0
+
+
+def is_valid_octal_string(value) -> bool:
+    """3-4 digit octal string, e.g. '755' or '0755'."""
+    return isinstance(value, str) and bool(re.match(r'^[0-7]{3,4}$', value))
+
+
+def is_valid_systemd_memory(value) -> bool:
+    """Digits followed by a single unit letter (K/M/G/T), e.g. '4G' or '512M'."""
+    return isinstance(value, str) and bool(re.match(r'^\d+[KMGTkmgt]$', value))
+
+
+def is_valid_service_name_part(value) -> bool:
+    """Lowercase letter followed by lowercase alphanumeric/hyphens."""
+    return isinstance(value, str) and bool(re.match(r'^[a-z][a-z0-9-]*$', value))
+
+
+def is_absolute_path(value) -> bool:
+    """String starting with '/'."""
+    return isinstance(value, str) and value.startswith('/')
+
+
+def is_valid_slug(value) -> bool:
+    """Alphanumeric (may start with letter or digit) plus hyphens."""
+    return isinstance(value, str) and bool(re.match(r'^[a-zA-Z0-9][a-zA-Z0-9-]*$', value))
+
+
+def is_valid_url_template(value, placeholders) -> bool:
+    """String containing all required {placeholder} markers."""
+    if not isinstance(value, str):
+        return False
+    return all(f'{{{p}}}' in value for p in placeholders)
+
+
 class RunnerConfig:
     """Parsed runner configuration"""
 
@@ -289,8 +356,10 @@ class RunnerConfig:
 class HostDeployer:
     """Main deployment orchestrator for host-based runners"""
 
-    def __init__(self, config_path: str = "config.yml"):
-        self.config_path = Path(config_path)
+    DEFAULT_CONFIG_PATH = "~/.config/gha-runnerd/config.yml"
+
+    def __init__(self, config_path: str = DEFAULT_CONFIG_PATH):
+        self.config_path = Path(config_path).expanduser()
         self.config = self._load_config()
         self.runners = self._parse_runners()
         self.git_sha = self._get_git_sha()
@@ -324,6 +393,34 @@ class HostDeployer:
         config.setdefault('sudoers', {})
         config['sudoers'].setdefault('path', '/etc/sudoers.d/gha-runner-cleanup')
 
+        # Apply defaults for github scope (backward compatible: default to org)
+        config['github'].setdefault('scope', 'org')
+
+        # Validate scope value
+        scope = config['github']['scope']
+        if scope not in ('org', 'enterprise'):
+            log(f"Invalid github.scope '{scope}'. Must be 'org' or 'enterprise'.", "error")
+            sys.exit(1)
+
+        # Validate scope-specific required fields
+        if scope == 'enterprise':
+            if not config['github'].get('enterprise'):
+                log("github.enterprise is required when scope is 'enterprise'", "error")
+                sys.exit(1)
+        else:
+            # scope == 'org'
+            if not config['github'].get('org'):
+                log("github.org is required when scope is 'org'", "error")
+                sys.exit(1)
+
+        # Apply defaults and normalization for runner_group
+        runner_group = config['github'].get('runner_group')
+        if runner_group is None:
+            config['github']['runner_group'] = {}
+        elif not isinstance(runner_group, dict):
+            log("github.runner_group must be a mapping (dict) if specified.", "error")
+            sys.exit(1)
+
         return config
 
     def _parse_runners(self) -> List[RunnerConfig]:
@@ -345,32 +442,129 @@ class HostDeployer:
         errors = []
         warnings = []
 
-        # Check for placeholder values
-        org = self.config.get('github', {}).get('org', '')
-        if org in ['your-org', '', None]:
-            errors.append("GitHub organization not set in config.yml (still using placeholder 'your-org')")
+        # Check scope-specific settings
+        scope = self.config.get('github', {}).get('scope', 'org')
+
+        if scope == 'enterprise':
+            enterprise = self.config.get('github', {}).get('enterprise', '')
+            if enterprise in ['your-enterprise', '', None]:
+                errors.append(
+                    "GitHub enterprise slug not set in config.yml "
+                    "(required when scope is 'enterprise')"
+                )
+
+            # runner_group validation
+            runner_group = self.config.get('github', {}).get('runner_group', {})
+            rg_name = runner_group.get('name')
+            if rg_name is not None and not isinstance(rg_name, str):
+                errors.append(
+                    f"runner_group.name must be a string, got {rg_name!r}"
+                )
+            if runner_group.get('allow_orgs'):
+                enterprise = self.config.get('github', {}).get('enterprise', '')
+                errors.append(
+                    "runner_group.allow_orgs is not supported — "
+                    "manage organization access in the GitHub UI: "
+                    f"https://github.com/enterprises/{enterprise}"
+                    f"/settings/actions/runner-groups"
+                )
+        else:
+            org = self.config.get('github', {}).get('org', '')
+            if org in ['your-org', '', None]:
+                errors.append(
+                    "GitHub organization not set in config.yml "
+                    "(still using placeholder 'your-org')"
+                )
 
         prefix = self.config.get('github', {}).get('prefix', '')
         if not prefix or prefix == '':
             errors.append("GitHub prefix not set in config.yml")
+        elif not is_valid_service_name_part(prefix):
+            errors.append(
+                f"GitHub prefix '{prefix}' is invalid — "
+                "must be lowercase, start with a letter, and contain only [a-z0-9-]"
+            )
 
+        # Validate org/enterprise slug format (beyond placeholder checks above)
+        if scope == 'enterprise':
+            ent_val = self.config.get('github', {}).get('enterprise', '')
+            if ent_val and ent_val not in ['your-enterprise', ''] and not is_valid_slug(ent_val):
+                errors.append(
+                    f"GitHub enterprise slug '{ent_val}' is invalid — "
+                    "must be alphanumeric with hyphens"
+                )
+        else:
+            org_val = self.config.get('github', {}).get('org', '')
+            if org_val and org_val not in ['your-org', ''] and not is_valid_slug(org_val):
+                errors.append(
+                    f"GitHub org '{org_val}' is invalid — "
+                    "must be alphanumeric with hyphens"
+                )
+
+        # Validate runner_group fields (already checked name/allow_orgs above for enterprise)
+        runner_group = self.config.get('github', {}).get('runner_group', {})
         # Check host configuration
         host_config = self.config.get('host', {})
-        if not host_config.get('runner_base'):
+        runner_base = host_config.get('runner_base')
+        if not runner_base:
             errors.append("Host runner_base not configured")
+        elif not is_absolute_path(runner_base):
+            errors.append(
+                f"Host runner_base '{runner_base}' must be an absolute path"
+            )
         if not host_config.get('label'):
             errors.append("Host label not configured")
-        if not host_config.get('docker_user_uid'):
+
+        # UID/GID: accept 0 (root) — use `is None` instead of `not value`
+        uid_val = host_config.get('docker_user_uid')
+        if uid_val is None:
             errors.append("Host docker_user_uid not configured")
-        if not host_config.get('docker_user_gid'):
+        elif not is_non_negative_int(uid_val):
+            errors.append(
+                f"Host docker_user_uid must be a non-negative integer, got {uid_val!r}"
+            )
+
+        gid_val = host_config.get('docker_user_gid')
+        if gid_val is None:
             errors.append("Host docker_user_gid not configured")
+        elif not is_non_negative_int(gid_val):
+            errors.append(
+                f"Host docker_user_gid must be a non-negative integer, got {gid_val!r}"
+            )
+
+        if host_config.get('docker_socket') is not None:
+            warnings.append(
+                "host.docker_socket is configured but not used by deploy-host.py, "
+                "may be removed in future"
+            )
 
         # Check runner configuration
         runner_config = self.config.get('runner', {})
         if not runner_config.get('version'):
             errors.append("Runner version not configured")
-        if not runner_config.get('arch'):
+
+        arch = runner_config.get('arch')
+        if not arch:
             errors.append("Runner architecture not configured")
+        else:
+            known_arches = [
+                'linux-x64', 'linux-arm64', 'linux-arm',
+                'osx-x64', 'osx-arm64', 'win-x64',
+            ]
+            if arch not in known_arches:
+                warnings.append(
+                    f"Runner arch '{arch}' is not a known value — "
+                    f"expected one of: {', '.join(known_arches)}"
+                )
+
+        # Validate download_url_template
+        url_tpl = runner_config.get('download_url_template')
+        if url_tpl is not None:
+            if not is_valid_url_template(url_tpl, ['version', 'arch']):
+                errors.append(
+                    "runner.download_url_template must contain both "
+                    "'{version}' and '{arch}' placeholders"
+                )
 
         # Validate runners list
         if not self.config.get('runners'):
@@ -409,6 +603,66 @@ class HostDeployer:
                 if 'pids_limit' not in size_config and size_name != 'max':
                     warnings.append(f"Size '{size_name}' missing 'pids_limit' (recommended)")
 
+                # Validate value types/formats when present
+                cpus_val = size_config.get('cpus')
+                if cpus_val is not None and not is_positive_number(cpus_val):
+                    errors.append(
+                        f"Size '{size_name}' cpus must be a positive number, got {cpus_val!r}"
+                    )
+
+                mem_val = size_config.get('mem_limit')
+                if mem_val is not None and not is_valid_systemd_memory(str(mem_val)):
+                    errors.append(
+                        f"Size '{size_name}' mem_limit must be a systemd memory value "
+                        f"like '4G' or '512M', got {mem_val!r}"
+                    )
+
+                pids_val = size_config.get('pids_limit')
+                if pids_val is not None and not is_positive_int(pids_val):
+                    errors.append(
+                        f"Size '{size_name}' pids_limit must be a positive integer, got {pids_val!r}"
+                    )
+
+        # Validate cache configuration
+        cache_config = self.config.get('cache', {})
+        cache_base = cache_config.get('base_dir')
+        if cache_base is not None and not is_absolute_path(cache_base):
+            errors.append(
+                f"cache.base_dir '{cache_base}' must be an absolute path"
+            )
+        cache_perms = cache_config.get('permissions')
+        if cache_perms is not None and not is_valid_octal_string(str(cache_perms)):
+            errors.append(
+                f"cache.permissions must be a valid octal string like '755' or '0755', "
+                f"got {cache_perms!r}"
+            )
+
+        # Validate systemd configuration
+        systemd_config = self.config.get('systemd', {})
+        valid_restart_policies = [
+            'always', 'on-failure', 'on-success', 'on-abnormal',
+            'on-watchdog', 'on-abort', 'no',
+        ]
+        restart_policy = systemd_config.get('restart_policy')
+        if restart_policy is not None and restart_policy not in valid_restart_policies:
+            errors.append(
+                f"systemd.restart_policy '{restart_policy}' is invalid — "
+                f"must be one of: {', '.join(valid_restart_policies)}"
+            )
+        restart_sec = systemd_config.get('restart_sec')
+        if restart_sec is not None and not is_positive_int(restart_sec):
+            errors.append(
+                f"systemd.restart_sec must be a positive integer, got {restart_sec!r}"
+            )
+
+        # Validate sudoers configuration
+        sudoers_config = self.config.get('sudoers', {})
+        sudoers_path = sudoers_config.get('path')
+        if sudoers_path is not None and not is_absolute_path(sudoers_path):
+            errors.append(
+                f"sudoers.path '{sudoers_path}' must be an absolute path"
+            )
+
         # Check for duplicate runner names
         runner_names = self.config.get('runners', [])
         if len(runner_names) != len(set(runner_names)):
@@ -428,7 +682,14 @@ class HostDeployer:
 
         if not errors and not warnings:
             log("\n✅ Configuration is valid!", "success")
-            log(f"  • Organization: {org}", "info")
+            log(f"  • Scope: {scope}", "info")
+            if scope == 'enterprise':
+                log(f"  • Enterprise: {self.config.get('github', {}).get('enterprise', '')}", "info")
+                runner_group = self.config.get('github', {}).get('runner_group', {})
+                if runner_group.get('name'):
+                    log(f"  • Runner group: {runner_group['name']}", "info")
+            else:
+                log(f"  • Organization: {self.config.get('github', {}).get('org', '')}", "info")
             log(f"  • Prefix: {prefix}", "info")
             log(f"  • Runners: {len(runner_names)}", "info")
             log(f"  • Sizes: {len(self.config.get('sizes', {}))}", "info")
@@ -453,19 +714,57 @@ class HostDeployer:
         date = datetime.now(timezone.utc).strftime("%Y.%m.%d")
         return f"{date}-{self.git_sha}"
 
+    @property
+    def scope(self) -> str:
+        """Return the configured scope: 'org' or 'enterprise'"""
+        return self.config['github'].get('scope', 'org')
+
+    @property
+    def api_base(self) -> str:
+        """Return the scope-appropriate GitHub API base path for runner operations.
+
+        For org scope:        /orgs/{org}
+        For enterprise scope: /enterprises/{enterprise}
+        """
+        if self.scope == 'enterprise':
+            enterprise = self.config['github']['enterprise']
+            return f"/enterprises/{enterprise}"
+        org = self.config['github']['org']
+        return f"/orgs/{org}"
+
+    @property
+    def runner_url(self) -> str:
+        """Return the URL passed to config.sh --url during runner registration.
+
+        For org scope:        https://github.com/{org}
+        For enterprise scope: https://github.com/enterprises/{enterprise}
+        """
+        if self.scope == 'enterprise':
+            enterprise = self.config['github']['enterprise']
+            return f"https://github.com/enterprises/{enterprise}"
+        org = self.config['github']['org']
+        return f"https://github.com/{org}"
+
+    def _gh_prefix(self) -> List[str]:
+        """Return command prefix to run gh as the original (non-root) user."""
+        sudo_user = os.environ.get('SUDO_USER')
+        if sudo_user and os.geteuid() == 0:
+            return ["sudo", "-u", sudo_user]
+        return []
+
     def fetch_github_token(self):
         """Fetch a fresh registration token from GitHub"""
-        # Run gh as the original user (not root) to access their gh auth
-        sudo_user = os.environ.get('SUDO_USER')
-        gh_prefix = []
-        if sudo_user and os.geteuid() == 0:
-            gh_prefix = ["sudo", "-u", sudo_user]
-
-        org = self.config['github']['org']
+        gh_prefix = self._gh_prefix()
+        api_path = f"{self.api_base}/actions/runners/registration-token"
+        scope_label = (
+            f"enterprise: {self.config['github']['enterprise']}"
+            if self.scope == 'enterprise'
+            else f"org: {self.config['github']['org']}"
+        )
 
         try:
-            log(f"Fetching registration token for org: {org}...", "info")
-            cmd = gh_prefix + ["gh", "api", "-X", "POST", f"/orgs/{org}/actions/runners/registration-token", "--jq", ".token"]
+            log(f"Fetching registration token for {scope_label}...", "info")
+            cmd = gh_prefix + ["gh", "api", "-X", "POST", api_path, "--jq", ".token"]
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             token = result.stdout.strip()
 
@@ -476,13 +775,17 @@ class HostDeployer:
             return token
 
         except subprocess.CalledProcessError as e:
-            log(f"Failed to fetch registration token", "error")
+            log("Failed to fetch registration token", "error")
             if e.stderr:
                 log(f"Error: {e.stderr.strip()}", "error")
             log("Possible causes:", "error")
             log("  • Not authenticated with gh CLI (run 'gh auth login')", "error")
-            log("  • Insufficient permissions for the organization", "error")
-            log("  • Organization name incorrect in config.yml", "error")
+            if self.scope == 'enterprise':
+                log("  • Insufficient permissions for the enterprise", "error")
+                log("  • Enterprise slug incorrect in config.yml", "error")
+            else:
+                log("  • Insufficient permissions for the organization", "error")
+                log("  • Organization name incorrect in config.yml", "error")
             return None
         except Exception as e:
             log(f"Unexpected error fetching token: {e}", "error")
@@ -673,44 +976,55 @@ class HostDeployer:
         log(f"Registering {runner.registered_name}...", "info")
 
         runner_path = Path(runner.runner_path)
-        org = self.config['github']['org']
-        runner_url = f"https://github.com/{org}"
+        reg_url = self.runner_url
 
-        log_debug(f"Runner URL: {runner_url}")
+        log_debug(f"Runner URL: {reg_url}")
         log_debug(f"Runner name: {runner.registered_name}")
         log_debug(f"Labels: {runner.labels}")
 
-        # Check if runner needs (re)configuration
-        runner_file = runner_path / ".runner"
-        credentials_file = runner_path / ".credentials"
+        # Check if runner needs (re)configuration.
+        # Use sudo to read files — they're owned by the runner user and
+        # may be inaccessible to the deploying user.
         labels_file = runner_path / ".labels"
 
         need_config = True
 
-        if not DRY_RUN and runner_file.exists() and credentials_file.exists():
-            # Check if labels match
-            if labels_file.exists():
-                current_labels = labels_file.read_text().strip()
+        if not DRY_RUN:
+            result = run_cmd(
+                ["cat", str(labels_file)],
+                sudo=True, check=False, capture=True,
+            )
+            if result and result.returncode == 0:
+                current_labels = result.stdout.strip()
                 log_debug(f"Current labels: {current_labels}")
                 if current_labels == runner.labels:
                     log(f"Runner {runner.registered_name} already configured with correct labels", "info")
                     need_config = False
                 else:
                     log(f"Labels changed, reconfiguring runner...", "info")
-                    # Remove existing configuration
-                    self._unconfigure_runner(runner, token)
-        
+
         if need_config or DRY_RUN:
+            # Always ensure clean state before (re)configuring
+            if not DRY_RUN:
+                self._unconfigure_runner(runner, token)
+
             # Run config.sh
             config_cmd = [
                 str(runner_path / "config.sh"),
-                "--url", runner_url,
+                "--url", reg_url,
                 "--token", "***TOKEN***" if DRY_RUN else token,
                 "--name", runner.registered_name,
                 "--labels", runner.labels,
                 "--unattended",
                 "--replace"
             ]
+
+            # Add runner group if configured (enterprise scope only)
+            runner_group_name = self.config['github'].get('runner_group', {}).get('name')
+            if runner_group_name and self.scope == 'enterprise':
+                config_cmd.extend(["--runnergroup", runner_group_name])
+            elif runner_group_name and self.scope == 'org':
+                log("runner_group.name is ignored for org-scoped runners (enterprise only)", "warning")
 
             # Run as the runner user
             uid = self.config['host']['docker_user_uid']
@@ -723,63 +1037,109 @@ class HostDeployer:
                 log_dry_run(f"Register runner {runner.registered_name} with GitHub")
                 log_dry_run(f"Labels: {runner.labels}")
             else:
-                try:
-                    run_cmd(
-                        ["sudo", "-u", f"#{uid}", "-g", f"#{gid}",
-                         "bash", "-c", f"cd {shlex.quote(str(runner_path))} && {' '.join(shlex.quote(arg) for arg in config_cmd)}"]
-                    )
-                except subprocess.CalledProcessError as e:
+                # Remove ALL runner config files before config.sh in the SAME
+                # shell — the runner checks both .runner and .runner_migrated
+                # in IsConfigured(), so both must be gone.
+                config_cmd_str = ' '.join(shlex.quote(arg) for arg in config_cmd)
+                rp = shlex.quote(str(runner_path))
+                shell_cmd = (
+                    f"cd {rp}"
+                    f" && rm -f {' '.join(RUNNER_CONFIG_FILES)}"
+                    f" && {config_cmd_str}"
+                )
+                result = run_cmd(
+                    ["sudo", "-u", f"#{uid}", "-g", f"#{gid}",
+                     "bash", "-c", shell_cmd],
+                    check=False, capture=True,
+                )
+                if result.returncode != 0:
+                    output = (result.stdout or "") + (result.stderr or "")
                     log(f"Failed to register runner {runner.registered_name}", "error")
-                    log("This usually means:", "error")
-                    log("  • Registration token is invalid or expired", "error")
-                    log("  • Token was already used (tokens are single-use)", "error")
-                    log("  • Network connectivity issues", "error")
-                    log("\nTry fetching a fresh token and re-running", "error")
-                    raise
+                    if output.strip():
+                        log(f"config.sh output:\n{output.strip()}", "error")
+                    # Show targeted advice based on the actual error
+                    out_lower = output.lower()
+                    if "already configured" in out_lower:
+                        log("The .runner file could not be removed (unexpected).", "error")
+                        log(f"Try manually: sudo rm -f {runner_path}/.runner && re-run deploy", "error")
+                    elif "runner group" in out_lower:
+                        enterprise = self.config['github'].get('enterprise', '')
+                        log(f"Runner group '{runner_group_name}' was not found.", "error")
+                        log(f"Check: https://github.com/enterprises/{enterprise}/settings/actions/runner-groups", "error")
+                    elif "unauthorized" in out_lower or "401" in output:
+                        log("Registration token is invalid or expired.", "error")
+                    elif "not found" in out_lower or "404" in output:
+                        log("The registration URL was not found (check scope/enterprise/org config).", "error")
+                    else:
+                        log("Re-run with --verbose for more details.", "info")
+                    sys.exit(1)
 
-            # Save labels
+            # Save labels (runner dir is owned by runner user, write via sudo)
             if DRY_RUN:
                 log_dry_run(f"Save labels to {labels_file}")
             else:
-                labels_file.write_text(runner.labels)
-                run_cmd(
-                    ["chown", f"{uid}:{gid}", str(labels_file)],
-                    sudo=True,
-                    sudo_reason=f"setting labels file ownership",
-                    dry_run_msg=f"Set labels file ownership"
-                )
+                temp_labels = Path(f"/tmp/gha-labels-{os.getpid()}")
+                try:
+                    temp_labels.write_text(runner.labels)
+                    run_cmd(
+                        ["cp", str(temp_labels), str(labels_file)],
+                        sudo=True,
+                        sudo_reason="saving labels file",
+                    )
+                    run_cmd(
+                        ["chown", f"{uid}:{gid}", str(labels_file)],
+                        sudo=True,
+                        sudo_reason="setting labels file ownership",
+                    )
+                finally:
+                    if temp_labels.exists():
+                        temp_labels.unlink()
 
             log(f"Registered {runner.registered_name}", "success")
 
     def _unconfigure_runner(self, runner: RunnerConfig, token: str):
-        """Remove runner configuration"""
+        """Stop runner service and try to deregister from GitHub.
+
+        This is best-effort cleanup. The critical file removal (.runner etc.)
+        happens atomically in register_runner's bash -c command, right before
+        config.sh runs, to avoid any gap where files could reappear.
+        """
         runner_path = Path(runner.runner_path)
-        
+
         log(f"Removing existing configuration for {runner.registered_name}...", "info")
-        
-        # Try to remove via config.sh
+
+        # Stop the service first so the running process can't interfere
+        service_name = f"{runner.service_name}.service"
+        run_cmd(
+            ["systemctl", "stop", service_name],
+            sudo=True,
+            sudo_reason=f"stopping {service_name} before reconfiguration",
+            check=False,
+        )
+
+        # Try to cleanly deregister via config.sh remove (best-effort).
+        # This tells GitHub to remove the runner. If it fails (e.g. 404
+        # because the token scope changed), we continue — the --replace
+        # flag during registration handles re-registration.
         remove_cmd = [
             str(runner_path / "config.sh"),
             "remove",
             "--token", token
         ]
-        
+
         uid = self.config['host']['docker_user_uid']
-        
+
         try:
-            run_cmd(
+            result = run_cmd(
                 ["sudo", "-u", f"#{uid}", "bash", "-c",
                  f"cd {shlex.quote(str(runner_path))} && {' '.join(shlex.quote(arg) for arg in remove_cmd)}"],
-                check=False
+                check=False, capture=True,
             )
+            if result and result.returncode != 0:
+                log("Could not deregister old runner (will re-register with --replace)", "warning")
+                log_debug(f"config.sh remove output: {(result.stdout or '') + (result.stderr or '')}")
         except Exception:
-            log("Failed to cleanly remove runner, will force cleanup", "warning")
-        
-        # Clean up config files
-        for f in [".runner", ".credentials", ".credentials_rsaparams", ".service", ".labels"]:
-            file_path = runner_path / f
-            if file_path.exists():
-                file_path.unlink()
+            log("Could not deregister old runner (will re-register with --replace)", "warning")
 
     def generate_hook_content(self, runner: RunnerConfig):
         """Generate the pre-job cleanup hook script content"""
@@ -901,7 +1261,9 @@ Defaults:#{uid} !requiretty
         except subprocess.CalledProcessError:
             temp_path.unlink()
             log("Sudoers file validation failed!", "error")
-            raise
+            log("The generated sudoers content did not pass visudo -c validation.", "error")
+            log("This is likely a bug in deploy-host.py — please report it.", "error")
+            sys.exit(1)
 
         # Move into place with sudo
         run_cmd(
@@ -1038,23 +1400,18 @@ WantedBy=multi-user.target
 
         log("Syncing labels via GitHub API...", "header")
 
-        org = self.config['github']['org']
-
-        # Run gh as the original user (not root) to access their gh auth
-        sudo_user = os.environ.get('SUDO_USER')
-        gh_prefix = []
-        if sudo_user and os.geteuid() == 0:
-            gh_prefix = ["sudo", "-u", sudo_user]
+        gh_prefix = self._gh_prefix()
+        api_runners = f"{self.api_base}/actions/runners"
 
         for runner in self.runners:
             try:
-                cmd = gh_prefix + ["gh", "api", f"/orgs/{org}/actions/runners",
+                cmd = gh_prefix + ["gh", "api", "--paginate", api_runners,
                      "--jq", f'.runners[] | select(.name=="{runner.registered_name}") | .id']
                 result = subprocess.run(cmd, capture_output=True, text=True, check=True)
                 runner_id = result.stdout.strip()
 
                 if not runner_id:
-                    log(f"Runner {runner.registered_name} not found in org, skipping", "warning")
+                    log(f"Runner {runner.registered_name} not found, skipping", "warning")
                     continue
 
                 # Update labels (filter out read-only labels that GitHub assigns automatically)
@@ -1062,7 +1419,8 @@ WantedBy=multi-user.target
                 labels = [l for l in runner.labels.split(',') if l not in readonly_labels]
                 labels_json = json.dumps({"labels": labels})
 
-                cmd = gh_prefix + ["gh", "api", "-X", "PUT", f"/orgs/{org}/actions/runners/{runner_id}/labels", "--input", "-"]
+                cmd = gh_prefix + ["gh", "api", "-X", "PUT",
+                       f"{api_runners}/{runner_id}/labels", "--input", "-"]
                 proc = subprocess.Popen(
                     cmd,
                     stdin=subprocess.PIPE,
@@ -1082,8 +1440,12 @@ WantedBy=multi-user.target
 
     def print_summary(self):
         """Print deployment summary"""
-        org = self.config['github']['org']
-        settings_url = f"https://github.com/organizations/{org}/settings/actions/runners"
+        if self.scope == 'enterprise':
+            enterprise = self.config['github']['enterprise']
+            settings_url = f"https://github.com/enterprises/{enterprise}/settings/actions/runners"
+        else:
+            org = self.config['github']['org']
+            settings_url = f"https://github.com/organizations/{org}/settings/actions/runners"
         removed = getattr(self, '_removed_runners', [])
 
         log("\n" + "="*60, "header")
@@ -1127,6 +1489,35 @@ WantedBy=multi-user.target
 
         log("\n" + "="*60 + "\n", "header")
 
+    def _is_runner_busy(self, runner_name: str) -> Optional[bool]:
+        """Check whether a runner is currently executing a job.
+
+        Returns True if busy, False if idle, None if the runner was not found
+        on GitHub (already removed or never registered).
+        """
+        prefix = self.config['github']['prefix']
+        registered_name = f"{prefix}-linux-{runner_name}"
+        gh_prefix = self._gh_prefix()
+        api_runners = f"{self.api_base}/actions/runners"
+
+        try:
+            result = run_cmd(
+                gh_prefix + ["gh", "api", api_runners,
+                             "--paginate", "--jq",
+                             f'.runners[] | select(.name == "{registered_name}") | .busy'],
+                capture=True,
+                check=False
+            )
+            value = result.stdout.strip().lower() if result else ""
+            if value == "true":
+                return True
+            elif value == "false":
+                return False
+            else:
+                return None
+        except Exception:
+            return None
+
     def _deregister_runner_from_github(self, runner_name, runner_path):
         """Deregister a runner from GitHub before local removal.
 
@@ -1134,7 +1525,6 @@ WantedBy=multi-user.target
         to the GitHub API if the runner directory or binary is missing.
         """
         token = os.environ.get("REGISTER_GITHUB_RUNNER_TOKEN")
-        org = self.config['github']['org']
         uid = self.config['host']['docker_user_uid']
         registered_name = f"{self.config['github']['prefix']}-linux-{runner_name}"
         config_script = runner_path / "config.sh"
@@ -1146,27 +1536,27 @@ WantedBy=multi-user.target
                 str(config_script), "remove", "--token", token
             ]
             try:
-                run_cmd(
+                result = run_cmd(
                     ["sudo", "-u", f"#{uid}", "bash", "-c",
                      f"cd {shlex.quote(str(runner_path))} && {' '.join(shlex.quote(arg) for arg in remove_cmd)}"],
                     check=False
                 )
-                log(f"Deregistered {registered_name} from GitHub", "success")
-                return True
+                if result and result.returncode == 0:
+                    log(f"Deregistered {registered_name} from GitHub", "success")
+                    return True
+                else:
+                    log("config.sh remove failed, trying GitHub API fallback...", "warning")
             except Exception:
-                log(f"config.sh remove failed, trying GitHub API fallback...", "warning")
+                log("config.sh remove failed, trying GitHub API fallback...", "warning")
 
         # Fallback: remove via GitHub API
         log(f"Deregistering {registered_name} from GitHub via API...", "info")
         try:
-            # Look up runner ID by name
-            sudo_user = os.environ.get('SUDO_USER')
-            gh_prefix = []
-            if sudo_user and os.geteuid() == 0:
-                gh_prefix = ["sudo", "-u", sudo_user]
+            gh_prefix = self._gh_prefix()
+            api_runners = f"{self.api_base}/actions/runners"
 
             result = run_cmd(
-                gh_prefix + ["gh", "api", f"/orgs/{org}/actions/runners",
+                gh_prefix + ["gh", "api", api_runners,
                              "--paginate", "--jq",
                              f'.runners[] | select(.name == "{registered_name}") | .id'],
                 capture=True,
@@ -1177,7 +1567,7 @@ WantedBy=multi-user.target
             if runner_id:
                 run_cmd(
                     gh_prefix + ["gh", "api", "-X", "DELETE",
-                                 f"/orgs/{org}/actions/runners/{runner_id}"],
+                                 f"{api_runners}/{runner_id}"],
                     check=False
                 )
                 log(f"Deregistered {registered_name} (ID: {runner_id}) from GitHub", "success")
@@ -1188,8 +1578,21 @@ WantedBy=multi-user.target
 
         except Exception as e:
             log(f"Failed to deregister {registered_name} from GitHub: {e}", "warning")
-            log(f"  You may need to manually remove it from:", "warning")
-            log(f"  https://github.com/organizations/{org}/settings/actions/runners", "warning")
+            log("  You may need to manually remove it from:", "warning")
+            if self.scope == 'enterprise':
+                enterprise = self.config['github']['enterprise']
+                log(
+                    f"  https://github.com/enterprises/{enterprise}"
+                    f"/settings/actions/runners",
+                    "warning",
+                )
+            else:
+                org = self.config['github']['org']
+                log(
+                    f"  https://github.com/organizations/{org}"
+                    f"/settings/actions/runners",
+                    "warning",
+                )
             return False
 
     def cleanup_removed_runners(self):
@@ -1226,6 +1629,13 @@ WantedBy=multi-user.target
             # If this runner is no longer in config, remove it
             if runner_name not in configured_names:
                 registered_name = f"{prefix}-linux-{runner_name}"
+
+                # Skip busy runners during cleanup to avoid killing in-progress jobs
+                busy = self._is_runner_busy(runner_name)
+                if busy:
+                    log(f"\n>>> Skipping runner: {registered_name} (busy, executing a job)", "warning")
+                    continue
+
                 log(f"\n>>> Removing runner: {registered_name} (not in config)", "warning")
                 service_name = f"{service_pattern}{runner_name}.service"
                 runner_path = Path(f"{self.config['host']['runner_base']}/{prefix}-linux-{runner_name}")
@@ -1367,7 +1777,7 @@ WantedBy=multi-user.target
         
         log(f"\nTotal runners: {len(runners_found)}", "info")
 
-    def remove_runner(self, runner_name: str):
+    def remove_runner(self, runner_name: str, force: bool = False):
         """Remove a specific runner by name"""
         log(f"Removing runner: {runner_name}\n", "warning")
 
@@ -1380,7 +1790,7 @@ WantedBy=multi-user.target
         prefix = self.config['github']['prefix']
         service_name = f"gha-{prefix}-linux-{runner_name}.service"
         runner_path = Path(f"{self.config['host']['runner_base']}/{prefix}-linux-{runner_name}")
-        
+
         # Check if service exists
         check_result = run_cmd(
             ["systemctl", "list-units", "--all", "--no-legend", service_name],
@@ -1388,11 +1798,20 @@ WantedBy=multi-user.target
             capture=True,
             check=False
         )
-        
+
         if not check_result.stdout.strip():
             log(f"Runner '{runner_name}' not found", "error")
             return False
-        
+
+        # Check if runner is busy (skip with --force)
+        if not force:
+            busy = self._is_runner_busy(runner_name)
+            if busy:
+                registered_name = f"{prefix}-linux-{runner_name}"
+                log(f"Runner '{registered_name}' is currently executing a job", "error")
+                log("Use --force to remove it anyway (will kill the running job)", "info")
+                return False
+
         # 1. Stop and disable service
         log(f"Stopping service {service_name}...", "info")
         run_cmd(
@@ -1522,15 +1941,14 @@ WantedBy=multi-user.target
                 check=False
             )
             
-            # Backup current version (just the binaries, not _work)
+            # Backup current version (just the binaries, not _work or config)
             backup_marker = runner_info['path'] / ".backup-done"
+            tar_excludes = ["--exclude=_work"] + [f"--exclude={f}" for f in RUNNER_CONFIG_FILES]
             if not backup_marker.exists():
                 log(f"Creating backup of runner binaries...", "info")
                 run_cmd(
                     ["tar", "-czf", f"{runner_info['path']}.backup.tar.gz",
-                     "-C", str(runner_info['path']),
-                     "--exclude=_work", "--exclude=.runner",
-                     "."],
+                     "-C", str(runner_info['path'])] + tar_excludes + ["."],
                     sudo=True,
                     sudo_reason="backing up runner before upgrade"
                 )
@@ -1539,13 +1957,12 @@ WantedBy=multi-user.target
                     sudo=True,
                     sudo_reason="creating backup marker after runner backup"
                 )
-            
-            # Extract new binaries (preserve _work and .runner)
+
+            # Extract new binaries (preserve _work and config files)
             log(f"Extracting new runner binaries...", "info")
             run_cmd(
-                ["tar", "-xzf", runner_tarball, 
-                 "-C", str(runner_info['path']),
-                 "--exclude=_work", "--exclude=.runner"],
+                ["tar", "-xzf", runner_tarball,
+                 "-C", str(runner_info['path'])] + tar_excludes,
                 sudo=True,
                 sudo_reason="extracting new runner binaries"
             )
@@ -1639,14 +2056,17 @@ Examples:
   # Remove a specific runner
   ./deploy-host.py --remove cpu-small-1
 
+  # Force-remove a busy runner (kills any running job)
+  ./deploy-host.py --remove cpu-small-1 --force
+
   # Upgrade all runner binaries
   ./deploy-host.py --upgrade
 
   # Deploy with verbose output
   ./deploy-host.py --verbose
 
-  # Deploy with custom config file
-  ./deploy-host.py --config custom-config.yml
+  # Deploy with custom config file (default: ~/.config/gha-runnerd/config.yml)
+  ./deploy-host.py --config /path/to/config.yml
 
   # Combine flags
   ./deploy-host.py --validate --verbose
@@ -1678,6 +2098,11 @@ Note: The script will prompt for sudo password when needed for system operations
         help='Remove a specific runner (e.g., cpu-small-1)'
     )
     parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Force removal even if the runner is busy (use with --remove)'
+    )
+    parser.add_argument(
         '--upgrade',
         action='store_true',
         help='Upgrade runner binaries for all deployed runners'
@@ -1689,8 +2114,8 @@ Note: The script will prompt for sudo password when needed for system operations
     )
     parser.add_argument(
         '--config',
-        default='config.yml',
-        help='Path to configuration file (default: config.yml)'
+        default=HostDeployer.DEFAULT_CONFIG_PATH,
+        help=f'Path to configuration file (default: {HostDeployer.DEFAULT_CONFIG_PATH})'
     )
 
     args = parser.parse_args()
@@ -1704,6 +2129,8 @@ Note: The script will prompt for sudo password when needed for system operations
         log("Verbose mode enabled", "debug")
     if DRY_RUN:
         log("Dry-run mode enabled - no changes will be made", "info")
+    if args.force and not args.remove:
+        log("--force has no effect without --remove", "warning")
 
     try:
         deployer = HostDeployer(config_path=args.config)
@@ -1715,7 +2142,7 @@ Note: The script will prompt for sudo password when needed for system operations
 
         # Handle --remove command
         if args.remove:
-            if deployer.remove_runner(args.remove):
+            if deployer.remove_runner(args.remove, force=args.force):
                 sys.exit(0)
             else:
                 sys.exit(1)
@@ -1755,10 +2182,23 @@ Note: The script will prompt for sudo password when needed for system operations
     except KeyboardInterrupt:
         log("\nDeployment cancelled by user", "warning")
         sys.exit(1)
+    except subprocess.CalledProcessError as e:
+        log(f"\nCommand failed: {' '.join(shlex.quote(str(a)) for a in e.cmd)}", "error")
+        if e.stderr:
+            log(f"stderr: {e.stderr.strip()}", "error")
+        if e.stdout:
+            log(f"stdout: {e.stdout.strip()}", "error")
+        log("Re-run with --verbose for more details.", "info")
+        if VERBOSE:
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
     except Exception as e:
-        log(f"Deployment failed: {e}", "error")
-        import traceback
-        traceback.print_exc()
+        log(f"\nDeployment failed: {e}", "error")
+        log("Re-run with --verbose for more details.", "info")
+        if VERBOSE:
+            import traceback
+            traceback.print_exc()
         sys.exit(1)
 
 

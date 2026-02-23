@@ -45,8 +45,9 @@ cd gha-runnerd
 pip install -r requirements.txt
 
 # Configure
-cp config.example.yml config.yml
-vim config.yml  # Edit with your settings
+mkdir -p ~/.config/gha-runnerd
+cp config.example.yml ~/.config/gha-runnerd/config.yml
+vim ~/.config/gha-runnerd/config.yml  # Edit with your settings
 
 # Authenticate with GitHub
 gh auth login
@@ -271,8 +272,9 @@ cd gha-runnerd
 pip install -r requirements.txt
 
 # Configure
-cp config.example.yml config.yml
-vim config.yml
+mkdir -p ~/.config/gha-runnerd
+cp config.example.yml ~/.config/gha-runnerd/config.yml
+vim ~/.config/gha-runnerd/config.yml
 
 # Deploy
 ./deploy-host.py

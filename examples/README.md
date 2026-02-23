@@ -54,12 +54,13 @@ Example runner deployment configurations:
 
 1. Copy an example config:
    ```bash
-   cp examples/configs/minimal.yml config.yml
+   mkdir -p ~/.config/gha-runnerd
+   cp examples/configs/minimal.yml ~/.config/gha-runnerd/config.yml
    ```
 
 2. Edit the configuration:
    ```bash
-   vim config.yml  # Update org, prefix, and host settings
+   vim ~/.config/gha-runnerd/config.yml  # Update org, prefix, and host settings
    ```
 
 3. Deploy:
@@ -82,11 +83,12 @@ The example configs are ready to use with minimal changes:
 1. **Choose an example** that fits your needs (minimal, production, or gpu-enabled)
 2. **Copy it** to your config file:
    ```bash
-   cp examples/configs/minimal.yml config.yml
+   mkdir -p ~/.config/gha-runnerd
+   cp examples/configs/minimal.yml ~/.config/gha-runnerd/config.yml
    ```
 3. **Edit organization details**:
    ```bash
-   vim config.yml  # Update 'org' and 'prefix' values
+   vim ~/.config/gha-runnerd/config.yml  # Update 'org' and 'prefix' values
    ```
 4. **Validate and deploy**:
    ```bash
