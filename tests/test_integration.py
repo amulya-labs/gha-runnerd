@@ -859,8 +859,8 @@ class TestEnterpriseScopeConfig(unittest.TestCase):
             deployer.config['github']['runner_group']['id'], 42
         )
 
-    def test_runner_group_allow_orgs_parsed(self):
-        """runner_group.allow_orgs is parsed from config"""
+    def test_runner_group_allow_orgs_not_supported(self):
+        """runner_group.allow_orgs is rejected by validation (manage in GitHub UI)"""
         cfg = self._base_config(
             scope='enterprise',
             enterprise='my-enterprise',
@@ -868,10 +868,7 @@ class TestEnterpriseScopeConfig(unittest.TestCase):
         )
         self._write_config(cfg)
         deployer = HostDeployer(config_path=str(self.config_file))
-        self.assertEqual(
-            deployer.config['github']['runner_group']['allow_orgs'],
-            ['org-a', 'org-b'],
-        )
+        self.assertFalse(deployer.validate_config())
 
 
 class TestEnterpriseScopeValidation(unittest.TestCase):
@@ -931,19 +928,19 @@ class TestEnterpriseScopeValidation(unittest.TestCase):
         with self.assertRaises(SystemExit):
             HostDeployer(config_path=str(self.config_file))
 
-    def test_allow_orgs_without_group_id_fails_validation(self):
-        """Specifying allow_orgs without runner_group.id fails validation"""
+    def test_allow_orgs_rejected_with_ui_link(self):
+        """allow_orgs is rejected — org access must be managed in GitHub UI"""
         cfg = self._enterprise_config(
-            runner_group={'allow_orgs': ['org-a']},
+            runner_group={'id': 1, 'allow_orgs': ['org-a']},
         )
         self._write_config(cfg)
         deployer = HostDeployer(config_path=str(self.config_file))
         self.assertFalse(deployer.validate_config())
 
-    def test_runner_group_with_id_and_allow_orgs_passes(self):
-        """runner_group with both id and allow_orgs passes validation"""
+    def test_runner_group_with_id_only_passes(self):
+        """runner_group with just id (no allow_orgs) passes validation"""
         cfg = self._enterprise_config(
-            runner_group={'id': 1, 'allow_orgs': ['org-a']},
+            runner_group={'id': 1},
         )
         self._write_config(cfg)
         deployer = HostDeployer(config_path=str(self.config_file))
@@ -1576,13 +1573,14 @@ class TestConfigValueValidation(unittest.TestCase):
 
     # -- allow_orgs --
 
-    def test_allow_orgs_invalid_slug_rejected(self):
+    def test_allow_orgs_rejected(self):
+        """allow_orgs is not supported — must use GitHub UI."""
         cfg = self._base_config()
         cfg['github']['scope'] = 'enterprise'
         cfg['github']['enterprise'] = 'test-enterprise'
         cfg['github']['runner_group'] = {
             'id': 1,
-            'allow_orgs': ['good-org', 'bad org'],
+            'allow_orgs': ['org-a'],
         }
         self.assertFalse(self._validate(cfg))
 

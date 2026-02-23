@@ -436,9 +436,14 @@ class HostDeployer:
 
             # runner_group validation
             runner_group = self.config.get('github', {}).get('runner_group', {})
-            if runner_group.get('allow_orgs') and not runner_group.get('id'):
+            if runner_group.get('allow_orgs'):
+                enterprise = self.config.get('github', {}).get('enterprise', '')
+                rg_id = runner_group.get('id', '')
                 errors.append(
-                    "runner_group.id is required when runner_group.allow_orgs is specified"
+                    "runner_group.allow_orgs is not supported — "
+                    "manage organization access in the GitHub UI instead: "
+                    f"https://github.com/enterprises/{enterprise}"
+                    f"/settings/actions/runner-groups/{rg_id}"
                 )
         else:
             org = self.config.get('github', {}).get('org', '')
@@ -480,12 +485,6 @@ class HostDeployer:
             errors.append(
                 f"runner_group.id must be a positive integer, got {rg_id!r}"
             )
-        for org_item in runner_group.get('allow_orgs', []):
-            if not is_valid_slug(org_item):
-                errors.append(
-                    f"runner_group.allow_orgs contains invalid slug '{org_item}'"
-                )
-
         # Check host configuration
         host_config = self.config.get('host', {})
         runner_base = host_config.get('runner_base')
@@ -671,8 +670,6 @@ class HostDeployer:
                 runner_group = self.config.get('github', {}).get('runner_group', {})
                 if runner_group.get('id'):
                     log(f"  • Runner group ID: {runner_group['id']}", "info")
-                if runner_group.get('allow_orgs'):
-                    log(f"  • Allowed orgs: {', '.join(runner_group['allow_orgs'])}", "info")
             else:
                 log(f"  • Organization: {self.config.get('github', {}).get('org', '')}", "info")
             log(f"  • Prefix: {prefix}", "info")
@@ -1393,80 +1390,6 @@ WantedBy=multi-user.target
             except Exception as e:
                 log(f"Failed to sync labels for {runner.registered_name}: {e}", "warning")
 
-    def sync_runner_group_org_access(self):
-        """Set organization access for an enterprise runner group.
-
-        When scope=enterprise and runner_group.id + runner_group.allow_orgs
-        are configured, this uses the GitHub API to grant the listed orgs
-        access to the runner group.
-        """
-        if self.scope != 'enterprise':
-            return
-
-        runner_group = self.config['github'].get('runner_group', {})
-        group_id = runner_group.get('id')
-        allow_orgs = runner_group.get('allow_orgs', [])
-
-        if not group_id or not allow_orgs:
-            log_debug("No runner_group org access to configure")
-            return
-
-        enterprise = self.config['github']['enterprise']
-        gh_prefix = self._gh_prefix()
-
-        log(f"Configuring org access for enterprise runner group {group_id}...", "header")
-
-        try:
-            # First, look up org IDs from slugs
-            org_ids = []
-            for org_slug in allow_orgs:
-                log(f"  Looking up org ID for '{org_slug}'...", "info")
-                result = subprocess.run(
-                    gh_prefix + ["gh", "api", f"/orgs/{org_slug}", "--jq", ".id"],
-                    capture_output=True, text=True, check=True
-                )
-                org_id = result.stdout.strip()
-                if org_id:
-                    org_ids.append(int(org_id))
-                    log_debug(f"  Org '{org_slug}' -> ID {org_id}")
-                else:
-                    log(f"  Could not resolve org '{org_slug}' to an ID, skipping", "warning")
-
-            if not org_ids:
-                log("No valid org IDs found, skipping runner group org access", "warning")
-                return
-
-            # Set org access on the runner group
-            api_path = (
-                f"/enterprises/{enterprise}/actions/runner-groups"
-                f"/{group_id}/organizations"
-            )
-            payload = json.dumps({"selected_organization_ids": org_ids})
-
-            log(f"  Setting org access: {allow_orgs} (IDs: {org_ids})", "info")
-            proc = subprocess.Popen(
-                gh_prefix + ["gh", "api", "-X", "PUT", api_path, "--input", "-"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            stdout, stderr = proc.communicate(input=payload)
-
-            if proc.returncode != 0:
-                raise Exception(f"gh api failed: {stderr}")
-
-            log(f"Runner group {group_id} org access configured", "success")
-
-        except Exception as e:
-            log(f"Failed to configure runner group org access: {e}", "warning")
-            log("  You may need to manually configure org access at:", "warning")
-            log(
-                f"  https://github.com/enterprises/{enterprise}"
-                f"/settings/actions/runner-groups/{group_id}",
-                "warning",
-            )
-
     def print_summary(self):
         """Print deployment summary"""
         if self.scope == 'enterprise':
@@ -2062,7 +1985,6 @@ WantedBy=multi-user.target
             self.create_systemd_service(runner)
 
         self.sync_labels_via_api()
-        self.sync_runner_group_org_access()
         self.print_summary()
 
 

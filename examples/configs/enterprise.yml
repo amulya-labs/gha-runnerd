@@ -6,12 +6,10 @@ github:
   scope: "enterprise"
   enterprise: "your-enterprise"  # GitHub Enterprise slug
   prefix: "ent"
-  # Assign runners to a runner group and grant org access
+  # Assign runners to a runner group (create in GitHub UI first)
+  # Manage org access at: https://github.com/enterprises/{enterprise}/settings/actions/runner-groups
   runner_group:
     id: 1                        # Enterprise runner group ID
-    allow_orgs:                  # Orgs that can use this runner group
-      - "org-a"
-      - "org-b"
 
 host:
   label: "ent-runners"

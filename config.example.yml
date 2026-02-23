@@ -40,9 +40,8 @@ github:
   # Runner group settings (enterprise scope only)
   # runner_group:
   #   id: 123                    # Enterprise runner group ID
-  #   allow_orgs:                # Orgs granted access to this runner group
-  #     - "org-a"
-  #     - "org-b"
+  # Note: manage org access to runner groups in the GitHub UI:
+  # https://github.com/enterprises/{enterprise}/settings/actions/runner-groups
 
 # Host environment
 host:
