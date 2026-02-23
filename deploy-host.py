@@ -289,8 +289,10 @@ class RunnerConfig:
 class HostDeployer:
     """Main deployment orchestrator for host-based runners"""
 
-    def __init__(self, config_path: str = "config.yml"):
-        self.config_path = Path(config_path)
+    DEFAULT_CONFIG_PATH = "~/.config/gha-runnerd/config.yml"
+
+    def __init__(self, config_path: str = DEFAULT_CONFIG_PATH):
+        self.config_path = Path(config_path).expanduser()
         self.config = self._load_config()
         self.runners = self._parse_runners()
         self.git_sha = self._get_git_sha()
@@ -1827,8 +1829,8 @@ Examples:
   # Deploy with verbose output
   ./deploy-host.py --verbose
 
-  # Deploy with custom config file
-  ./deploy-host.py --config custom-config.yml
+  # Deploy with custom config file (default: ~/.config/gha-runnerd/config.yml)
+  ./deploy-host.py --config /path/to/config.yml
 
   # Combine flags
   ./deploy-host.py --validate --verbose
@@ -1871,8 +1873,8 @@ Note: The script will prompt for sudo password when needed for system operations
     )
     parser.add_argument(
         '--config',
-        default='config.yml',
-        help='Path to configuration file (default: config.yml)'
+        default=HostDeployer.DEFAULT_CONFIG_PATH,
+        help=f'Path to configuration file (default: {HostDeployer.DEFAULT_CONFIG_PATH})'
     )
 
     args = parser.parse_args()
