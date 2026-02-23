@@ -1615,5 +1615,392 @@ class TestConfigValueValidation(unittest.TestCase):
         self.assertTrue(self._validate(cfg))
 
 
+class TestRunnerConfigFilesConstant(unittest.TestCase):
+    """Verify RUNNER_CONFIG_FILES constant is complete and consistent"""
+
+    def test_runner_file_in_list(self):
+        """The primary .runner config must be in the list"""
+        self.assertIn(".runner", deploy_host.RUNNER_CONFIG_FILES)
+
+    def test_runner_migrated_in_list(self):
+        """IsConfigured() checks .runner_migrated — must be in the list"""
+        self.assertIn(".runner_migrated", deploy_host.RUNNER_CONFIG_FILES)
+
+    def test_credentials_in_list(self):
+        self.assertIn(".credentials", deploy_host.RUNNER_CONFIG_FILES)
+
+    def test_credentials_migrated_in_list(self):
+        self.assertIn(".credentials_migrated", deploy_host.RUNNER_CONFIG_FILES)
+
+    def test_credentials_rsaparams_in_list(self):
+        self.assertIn(".credentials_rsaparams", deploy_host.RUNNER_CONFIG_FILES)
+
+    def test_credential_store_in_list(self):
+        self.assertIn(".credential_store", deploy_host.RUNNER_CONFIG_FILES)
+
+    def test_setup_info_in_list(self):
+        self.assertIn(".setup_info", deploy_host.RUNNER_CONFIG_FILES)
+
+    def test_all_entries_are_dotfiles(self):
+        """Every config file should be a dotfile"""
+        for f in deploy_host.RUNNER_CONFIG_FILES:
+            self.assertTrue(f.startswith("."), f"{f} is not a dotfile")
+
+    def test_no_duplicates(self):
+        self.assertEqual(
+            len(deploy_host.RUNNER_CONFIG_FILES),
+            len(set(deploy_host.RUNNER_CONFIG_FILES)),
+        )
+
+
+class TestRegisterRunnerIdempotency(unittest.TestCase):
+    """Test that register_runner handles all config files correctly"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "test-config.yml"
+        cfg = {
+            'github': {'org': 'test-org', 'prefix': 'test', 'scope': 'org'},
+            'host': {
+                'runner_base': '/srv/gha',
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
+                'label': 'test-host',
+            },
+            'cache': {'base_dir': '/srv/gha-cache', 'permissions': '755'},
+            'runners': ['cpu-small-1'],
+            'sizes': {'small': {'cpus': 2.0, 'mem_limit': '4g'}},
+            'runner': {'version': '2.321.0', 'arch': 'linux-x64'},
+        }
+        with open(self.config_file, 'w') as f:
+            yaml.dump(cfg, f)
+        self.deployer = HostDeployer(config_path=str(self.config_file))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    @patch.dict(os.environ, {"REGISTER_GITHUB_RUNNER_TOKEN": "fake-token"})
+    @patch.object(deploy_host, 'run_cmd')
+    def test_rm_command_includes_all_config_files(self, mock_run_cmd):
+        """The bash -c shell command must rm every file in RUNNER_CONFIG_FILES"""
+        # First call: sudo cat .labels → file not found (needs config)
+        mock_run_cmd.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr=""
+        )
+
+        # _unconfigure_runner calls: systemctl stop, config.sh remove
+        # register_runner calls: bash -c (rm + config.sh) → capture the shell_cmd
+        def capture_side_effect(cmd, **kwargs):
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="", stderr=""
+            )
+
+        mock_run_cmd.side_effect = capture_side_effect
+
+        runner = self.deployer.runners[0]
+        # We expect sys.exit(1) if config.sh fails, but we mock it to succeed
+        self.deployer.register_runner(runner)
+
+        # Find the bash -c call that contains rm and config.sh
+        shell_calls = [
+            call for call in mock_run_cmd.call_args_list
+            if any("bash" in str(a) for a in call[0])
+            and any("rm" in str(a) for a in call[0])
+        ]
+        self.assertTrue(len(shell_calls) > 0, "No bash -c call with rm found")
+        shell_cmd = str(shell_calls[-1])
+
+        for config_file in deploy_host.RUNNER_CONFIG_FILES:
+            self.assertIn(
+                config_file, shell_cmd,
+                f"{config_file} missing from rm command in register_runner"
+            )
+
+    @patch.dict(os.environ, {"REGISTER_GITHUB_RUNNER_TOKEN": "fake-token"})
+    @patch.object(deploy_host, 'run_cmd')
+    def test_rm_and_config_sh_in_same_bash_command(self, mock_run_cmd):
+        """rm and config.sh must be in a single bash -c (atomic, no gap)"""
+        mock_run_cmd.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+
+        runner = self.deployer.runners[0]
+        self.deployer.register_runner(runner)
+
+        # Find the bash -c call
+        bash_calls = [
+            call for call in mock_run_cmd.call_args_list
+            if len(call[0]) > 0 and len(call[0][0]) > 0
+            and "bash" in call[0][0] and "-c" in call[0][0]
+        ]
+        # Extract the shell command string (last arg of bash -c)
+        for call in mock_run_cmd.call_args_list:
+            args = call[0][0] if call[0] else []
+            if isinstance(args, list) and "bash" in args and "-c" in args:
+                c_idx = args.index("-c")
+                if c_idx + 1 < len(args):
+                    shell_cmd = args[c_idx + 1]
+                    if "rm -f" in shell_cmd and "config.sh" in shell_cmd:
+                        # Both rm and config.sh are in the same shell command
+                        rm_pos = shell_cmd.index("rm -f")
+                        config_pos = shell_cmd.index("config.sh")
+                        self.assertLess(
+                            rm_pos, config_pos,
+                            "rm must run before config.sh in the shell command"
+                        )
+                        return
+        self.fail("Could not find a bash -c command containing both rm and config.sh")
+
+    @patch.dict(os.environ, {"REGISTER_GITHUB_RUNNER_TOKEN": "fake-token"})
+    @patch.object(deploy_host, 'run_cmd')
+    def test_skip_registration_when_labels_match(self, mock_run_cmd):
+        """Runner with matching labels should not be re-registered"""
+        runner = self.deployer.runners[0]
+        expected_labels = runner.labels
+
+        # sudo cat .labels returns matching labels
+        mock_run_cmd.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=expected_labels, stderr=""
+        )
+
+        self.deployer.register_runner(runner)
+
+        # Should only have the single sudo cat call — no config.sh
+        calls_with_config_sh = [
+            c for c in mock_run_cmd.call_args_list
+            if "config.sh" in str(c)
+        ]
+        self.assertEqual(
+            len(calls_with_config_sh), 0,
+            "config.sh should not run when labels already match"
+        )
+
+    @patch.dict(os.environ, {"REGISTER_GITHUB_RUNNER_TOKEN": "fake-token"})
+    @patch.object(deploy_host, 'run_cmd')
+    def test_reconfigures_when_labels_differ(self, mock_run_cmd):
+        """Runner with different labels triggers reconfiguration"""
+        runner = self.deployer.runners[0]
+
+        def side_effect(cmd, **kwargs):
+            cmd_str = str(cmd)
+            # sudo cat .labels returns stale labels
+            if "cat" in cmd_str and ".labels" in cmd_str:
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=0, stdout="old-labels", stderr=""
+                )
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout="", stderr=""
+            )
+
+        mock_run_cmd.side_effect = side_effect
+
+        self.deployer.register_runner(runner)
+
+        # config.sh should have been called (in the bash -c command)
+        config_calls = [
+            c for c in mock_run_cmd.call_args_list
+            if "config.sh" in str(c) and "remove" not in str(c)
+            and "--url" in str(c)
+        ]
+        self.assertGreater(
+            len(config_calls), 0,
+            "config.sh registration should run when labels differ"
+        )
+
+    @patch.dict(os.environ, {}, clear=False)
+    @patch.object(deploy_host, 'run_cmd')
+    def test_skips_registration_without_token(self, mock_run_cmd):
+        """Missing REGISTER_GITHUB_RUNNER_TOKEN skips registration gracefully"""
+        os.environ.pop("REGISTER_GITHUB_RUNNER_TOKEN", None)
+        runner = self.deployer.runners[0]
+        # Should not raise, should not call run_cmd
+        self.deployer.register_runner(runner)
+        # No run_cmd calls — registration was skipped entirely
+        self.assertEqual(mock_run_cmd.call_count, 0)
+
+
+class TestUnconfigureRunnerIdempotency(unittest.TestCase):
+    """Test _unconfigure_runner is safe to call multiple times"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "test-config.yml"
+        cfg = {
+            'github': {'org': 'test-org', 'prefix': 'test', 'scope': 'org'},
+            'host': {
+                'runner_base': '/srv/gha',
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
+                'label': 'test-host',
+            },
+            'cache': {'base_dir': '/srv/gha-cache', 'permissions': '755'},
+            'runners': ['cpu-small-1'],
+            'sizes': {'small': {'cpus': 2.0, 'mem_limit': '4g'}},
+            'runner': {'version': '2.321.0', 'arch': 'linux-x64'},
+        }
+        with open(self.config_file, 'w') as f:
+            yaml.dump(cfg, f)
+        self.deployer = HostDeployer(config_path=str(self.config_file))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    @patch.object(deploy_host, 'run_cmd')
+    def test_unconfigure_stops_service_first(self, mock_run_cmd):
+        """Service must be stopped before config.sh remove runs"""
+        mock_run_cmd.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        runner = self.deployer.runners[0]
+        self.deployer._unconfigure_runner(runner, "fake-token")
+
+        calls = mock_run_cmd.call_args_list
+        # First call should be systemctl stop
+        first_cmd = calls[0][0][0]
+        self.assertIn("systemctl", first_cmd)
+        self.assertIn("stop", first_cmd)
+
+    @patch.object(deploy_host, 'run_cmd')
+    def test_unconfigure_survives_service_stop_failure(self, mock_run_cmd):
+        """_unconfigure_runner must not crash if systemctl stop fails"""
+        mock_run_cmd.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="unit not found"
+        )
+        runner = self.deployer.runners[0]
+        # Should not raise
+        self.deployer._unconfigure_runner(runner, "fake-token")
+
+    @patch.object(deploy_host, 'run_cmd')
+    def test_unconfigure_survives_config_sh_remove_failure(self, mock_run_cmd):
+        """_unconfigure_runner must not crash if config.sh remove fails (e.g. 404)"""
+        mock_run_cmd.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="404 Not Found"
+        )
+        runner = self.deployer.runners[0]
+        # Should not raise
+        self.deployer._unconfigure_runner(runner, "fake-token")
+
+    @patch.object(deploy_host, 'run_cmd')
+    def test_unconfigure_survives_config_sh_exception(self, mock_run_cmd):
+        """_unconfigure_runner must not crash on unexpected exceptions"""
+        call_count = [0]
+
+        def side_effect(cmd, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # systemctl stop: ok
+                return subprocess.CompletedProcess(args=cmd, returncode=0)
+            # config.sh remove: unexpected error
+            raise OSError("no such file")
+
+        mock_run_cmd.side_effect = side_effect
+        runner = self.deployer.runners[0]
+        # Should not raise — exception is caught
+        self.deployer._unconfigure_runner(runner, "fake-token")
+
+
+class TestUpgradePreservesConfigFiles(unittest.TestCase):
+    """Verify upgrade tar commands exclude ALL runner config files"""
+
+    def test_upgrade_tar_excludes_all_config_files(self):
+        """Every RUNNER_CONFIG_FILES entry must be excluded from tar during upgrade"""
+        # Read the source and find the tar_excludes construction
+        source = Path(__file__).parent.parent / "deploy-host.py"
+        source_text = source.read_text()
+
+        # The upgrade method builds tar_excludes from RUNNER_CONFIG_FILES.
+        # Verify by checking the constant is referenced in upgrade_runners.
+        self.assertIn("RUNNER_CONFIG_FILES", source_text)
+
+        # Also verify the constant is used to build tar excludes (not hardcoded)
+        # by checking that 'tar_excludes' is built from RUNNER_CONFIG_FILES
+        self.assertIn("tar_excludes", source_text)
+        # The line should reference RUNNER_CONFIG_FILES
+        lines = source_text.split('\n')
+        tar_exclude_lines = [
+            l for l in lines if 'tar_excludes' in l and 'RUNNER_CONFIG_FILES' in l
+        ]
+        self.assertTrue(
+            len(tar_exclude_lines) > 0,
+            "tar_excludes must be built from RUNNER_CONFIG_FILES constant"
+        )
+
+    def test_upgrade_preserves_work_directory(self):
+        """_work directory must always be excluded from tar operations"""
+        source = Path(__file__).parent.parent / "deploy-host.py"
+        source_text = source.read_text()
+        # _work must be excluded (it contains job data)
+        self.assertIn("--exclude=_work", source_text)
+
+    def test_config_files_not_hardcoded_in_upgrade(self):
+        """Upgrade should not hardcode .runner — it should use the constant"""
+        source = Path(__file__).parent.parent / "deploy-host.py"
+        source_text = source.read_text()
+
+        # Find the upgrade_runners method
+        in_upgrade = False
+        hardcoded_excludes = []
+        for line in source_text.split('\n'):
+            if 'def upgrade_runners' in line:
+                in_upgrade = True
+            elif in_upgrade and line.strip().startswith('def '):
+                break
+            elif in_upgrade and '--exclude=.runner' in line:
+                # This would be a hardcoded exclude — should use the constant
+                hardcoded_excludes.append(line.strip())
+
+        self.assertEqual(
+            hardcoded_excludes, [],
+            f"Found hardcoded --exclude=.runner in upgrade_runners: {hardcoded_excludes}"
+        )
+
+
+class TestConfigFileConsistency(unittest.TestCase):
+    """Ensure config file handling is consistent across all flows"""
+
+    def test_register_and_upgrade_use_same_constant(self):
+        """Both register_runner and upgrade_runners must reference RUNNER_CONFIG_FILES"""
+        source = Path(__file__).parent.parent / "deploy-host.py"
+        source_text = source.read_text()
+
+        # Find methods that reference RUNNER_CONFIG_FILES
+        methods_using_constant = set()
+        current_method = None
+        for line in source_text.split('\n'):
+            stripped = line.strip()
+            if stripped.startswith('def '):
+                current_method = stripped.split('(')[0].replace('def ', '')
+            if 'RUNNER_CONFIG_FILES' in line and current_method:
+                methods_using_constant.add(current_method)
+
+        # Both register_runner and upgrade_runners must use the constant
+        self.assertIn('register_runner', methods_using_constant,
+                       "register_runner must use RUNNER_CONFIG_FILES")
+        self.assertIn('upgrade_runners', methods_using_constant,
+                       "upgrade_runners must use RUNNER_CONFIG_FILES")
+
+    def test_runner_migrated_always_paired_with_runner(self):
+        """Wherever .runner is deleted, .runner_migrated must also be deleted"""
+        # This is guaranteed by using the RUNNER_CONFIG_FILES constant,
+        # but verify it's true in the actual rm commands
+        source = Path(__file__).parent.parent / "deploy-host.py"
+        source_text = source.read_text()
+
+        lines = source_text.split('\n')
+        for i, line in enumerate(lines):
+            if 'rm -f' in line and '.runner' in line and 'RUNNER_CONFIG_FILES' not in line:
+                # If there's a hardcoded rm that mentions .runner, it must
+                # also mention .runner_migrated (or be a manual cleanup hint)
+                if '.runner_migrated' not in line and 'Try manually' not in line:
+                    self.fail(
+                        f"Line {i+1} deletes .runner without .runner_migrated: "
+                        f"{line.strip()}"
+                    )
+
+
 if __name__ == '__main__':
     unittest.main()

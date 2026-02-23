@@ -36,6 +36,20 @@ except ImportError:
 VERBOSE = False
 DRY_RUN = False
 
+# Runner config files that must be removed before re-registration and
+# preserved during binary upgrades.  The Actions runner's IsConfigured()
+# checks both .runner and .runner_migrated — all files listed here are
+# deleted atomically before config.sh runs.
+RUNNER_CONFIG_FILES = [
+    ".runner",
+    ".runner_migrated",
+    ".credentials",
+    ".credentials_migrated",
+    ".credentials_rsaparams",
+    ".credential_store",
+    ".setup_info",
+]
+
 
 class Colors:
     """ANSI color codes for terminal output"""
@@ -1021,14 +1035,9 @@ class HostDeployer:
                 # in IsConfigured(), so both must be gone.
                 config_cmd_str = ' '.join(shlex.quote(arg) for arg in config_cmd)
                 rp = shlex.quote(str(runner_path))
-                config_files = (
-                    ".runner .runner_migrated"
-                    " .credentials .credentials_migrated .credentials_rsaparams"
-                    " .credential_store .setup_info"
-                )
                 shell_cmd = (
                     f"cd {rp}"
-                    f" && rm -f {config_files}"
+                    f" && rm -f {' '.join(RUNNER_CONFIG_FILES)}"
                     f" && {config_cmd_str}"
                 )
                 result = run_cmd(
@@ -1919,15 +1928,14 @@ WantedBy=multi-user.target
                 check=False
             )
             
-            # Backup current version (just the binaries, not _work)
+            # Backup current version (just the binaries, not _work or config)
             backup_marker = runner_info['path'] / ".backup-done"
+            tar_excludes = ["--exclude=_work"] + [f"--exclude={f}" for f in RUNNER_CONFIG_FILES]
             if not backup_marker.exists():
                 log(f"Creating backup of runner binaries...", "info")
                 run_cmd(
                     ["tar", "-czf", f"{runner_info['path']}.backup.tar.gz",
-                     "-C", str(runner_info['path']),
-                     "--exclude=_work", "--exclude=.runner",
-                     "."],
+                     "-C", str(runner_info['path'])] + tar_excludes + ["."],
                     sudo=True,
                     sudo_reason="backing up runner before upgrade"
                 )
@@ -1936,13 +1944,12 @@ WantedBy=multi-user.target
                     sudo=True,
                     sudo_reason="creating backup marker after runner backup"
                 )
-            
-            # Extract new binaries (preserve _work and .runner)
+
+            # Extract new binaries (preserve _work and config files)
             log(f"Extracting new runner binaries...", "info")
             run_cmd(
-                ["tar", "-xzf", runner_tarball, 
-                 "-C", str(runner_info['path']),
-                 "--exclude=_work", "--exclude=.runner"],
+                ["tar", "-xzf", runner_tarball,
+                 "-C", str(runner_info['path'])] + tar_excludes,
                 sudo=True,
                 sudo_reason="extracting new runner binaries"
             )
