@@ -1,0 +1,165 @@
+---
+# Ansible playbook for deploying gha-runnerd across multiple hosts.
+#
+# Usage:
+#   ansible-playbook -i inventory.ini playbook.yml \
+#     -e "github_token=$REGISTER_GITHUB_RUNNER_TOKEN"
+#
+# Prerequisites on control node:
+#   - ansible >= 2.12
+#   - SSH access to target hosts
+#
+# What this playbook does:
+#   1. Installs prerequisites (Docker, gh CLI, Python, PyYAML)
+#   2. Creates the CI runner user
+#   3. Templates the config file from your variables
+#   4. Copies the deploy script
+#   5. Runs the deployment
+
+- name: Deploy GitHub Actions self-hosted runners
+  hosts: runners
+  become: true
+  vars:
+    gha_user: ci-docker
+    gha_uid: 1003
+    gha_gid: 1003
+    gha_runner_base: /srv/gha
+    gha_cache_dir: /srv/gha-cache
+    gha_config_dir: /root/.config/gha-runnerd
+    gha_script_dest: /usr/local/bin/deploy-host.py
+    runner_version: "2.329.0"
+    runner_arch: "linux-x64"
+
+  tasks:
+    - name: Install system packages
+      ansible.builtin.package:
+        name:
+          - curl
+          - git
+          - python3
+          - python3-pip
+          - jq
+        state: present
+
+    - name: Install PyYAML
+      ansible.builtin.pip:
+        name: pyyaml
+        state: present
+
+    - name: Install Docker (Debian/Ubuntu)
+      when: ansible_os_family == "Debian"
+      block:
+        - name: Install Docker prerequisites
+          ansible.builtin.apt:
+            name:
+              - docker.io
+              - docker-compose-plugin
+            state: present
+            update_cache: true
+
+        - name: Enable and start Docker
+          ansible.builtin.systemd:
+            name: docker
+            enabled: true
+            state: started
+
+    - name: Install Docker (RHEL/Fedora)
+      when: ansible_os_family == "RedHat"
+      block:
+        - name: Install Docker via dnf
+          ansible.builtin.dnf:
+            name:
+              - docker-ce
+              - docker-ce-cli
+              - containerd.io
+            state: present
+
+        - name: Enable and start Docker
+          ansible.builtin.systemd:
+            name: docker
+            enabled: true
+            state: started
+
+    - name: Install GitHub CLI (Debian/Ubuntu)
+      ansible.builtin.shell: |
+        if ! command -v gh &>/dev/null; then
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+            | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            | tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          apt-get update && apt-get install -y gh
+        fi
+      args:
+        creates: /usr/bin/gh
+      when: ansible_os_family == "Debian"
+
+    - name: Install GitHub CLI (RHEL/Fedora)
+      ansible.builtin.shell: |
+        if ! command -v gh &>/dev/null; then
+          dnf install -y 'dnf-command(config-manager)' || true
+          dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
+          dnf install -y gh
+        fi
+      args:
+        creates: /usr/bin/gh
+      when: ansible_os_family == "RedHat"
+
+    - name: Create CI runner group
+      ansible.builtin.group:
+        name: "{{ gha_user }}"
+        gid: "{{ gha_gid }}"
+        state: present
+
+    - name: Create CI runner user
+      ansible.builtin.user:
+        name: "{{ gha_user }}"
+        uid: "{{ gha_uid }}"
+        group: "{{ gha_user }}"
+        home: "/home/{{ gha_user }}"
+        shell: /bin/bash
+        system: true
+        create_home: true
+
+    - name: Add runner user to docker group
+      ansible.builtin.user:
+        name: "{{ gha_user }}"
+        groups: docker
+        append: true
+
+    - name: Create config directory
+      ansible.builtin.file:
+        path: "{{ gha_config_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Template runner config
+      ansible.builtin.template:
+        src: templates/config.yml.j2
+        dest: "{{ gha_config_dir }}/config.yml"
+        mode: "0644"
+
+    - name: Copy deploy script
+      ansible.builtin.copy:
+        src: ../../deploy-host.py
+        dest: "{{ gha_script_dest }}"
+        mode: "0755"
+
+    - name: Validate configuration
+      ansible.builtin.command:
+        cmd: "python3 {{ gha_script_dest }} --validate --config {{ gha_config_dir }}/config.yml"
+      changed_when: false
+
+    - name: Deploy runners
+      ansible.builtin.command:
+        cmd: "python3 {{ gha_script_dest }} --config {{ gha_config_dir }}/config.yml"
+      environment:
+        REGISTER_GITHUB_RUNNER_TOKEN: "{{ github_token }}"
+      changed_when: true
+
+    - name: Set up metrics cron job
+      ansible.builtin.cron:
+        name: "gha-runner-metrics"
+        minute: "*"
+        job: "python3 {{ gha_script_dest }} --metrics --config {{ gha_config_dir }}/config.yml 2>/dev/null"
+        user: root
+      when: gha_metrics_enabled | default(false)

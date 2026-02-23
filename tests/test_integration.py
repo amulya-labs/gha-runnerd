@@ -2018,5 +2018,432 @@ class TestConfigFileConsistency(unittest.TestCase):
                     )
 
 
+class TestHealthCheck(unittest.TestCase):
+    """Test the --health command output and exit codes"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "test-config.yml"
+        config = {
+            'github': {'org': 'test-org', 'prefix': 'test'},
+            'host': {
+                'runner_base': self.temp_dir,
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
+                'label': 'test-host'
+            },
+            'cache': {'base_dir': self.temp_dir, 'permissions': '755'},
+            'runners': ['cpu-small-1'],
+            'sizes': {'small': {'cpus': 2.0, 'mem_limit': '4g'}},
+            'runner': {'version': '2.321.0', 'arch': 'linux-x64'}
+        }
+        with open(self.config_file, 'w') as f:
+            yaml.dump(config, f)
+        self.deployer = HostDeployer(config_path=str(self.config_file))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    @patch.object(deploy_host, 'run_cmd')
+    def test_health_returns_0_when_all_healthy(self, mock_run_cmd):
+        """All runners active + online = exit code 0"""
+        # _get_deployed_runners: systemctl list-units
+        list_result = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="gha-test-linux-cpu-small-1.service loaded active running\n",
+            stderr=""
+        )
+        # _get_deployed_runners: systemctl is-active
+        active_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="active\n", stderr=""
+        )
+        # _get_runner_github_status: gh api
+        gh_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="online/false\n", stderr=""
+        )
+        mock_run_cmd.side_effect = [list_result, active_result, gh_result]
+
+        exit_code = self.deployer.health_check()
+        self.assertEqual(exit_code, 0)
+
+    @patch.object(deploy_host, 'run_cmd')
+    def test_health_returns_1_when_service_inactive(self, mock_run_cmd):
+        """Inactive systemd service = exit code 1"""
+        list_result = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="gha-test-linux-cpu-small-1.service loaded inactive dead\n",
+            stderr=""
+        )
+        inactive_result = subprocess.CompletedProcess(
+            args=[], returncode=3, stdout="inactive\n", stderr=""
+        )
+        gh_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="offline/false\n", stderr=""
+        )
+        mock_run_cmd.side_effect = [list_result, inactive_result, gh_result]
+
+        exit_code = self.deployer.health_check()
+        self.assertEqual(exit_code, 1)
+
+    @patch.object(deploy_host, 'run_cmd')
+    def test_health_json_output(self, mock_run_cmd):
+        """--json flag produces valid JSON"""
+        import json as json_mod
+        list_result = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="gha-test-linux-cpu-small-1.service loaded active running\n",
+            stderr=""
+        )
+        active_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="active\n", stderr=""
+        )
+        gh_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="online/false\n", stderr=""
+        )
+        mock_run_cmd.side_effect = [list_result, active_result, gh_result]
+
+        from io import StringIO
+        with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
+            exit_code = self.deployer.health_check(json_output=True)
+
+        output = mock_stdout.getvalue()
+        data = json_mod.loads(output)
+        self.assertIn('healthy', data)
+        self.assertIn('runners', data)
+        self.assertIn('disk', data)
+        self.assertIsInstance(data['runners'], list)
+        self.assertEqual(exit_code, 0)
+
+    @patch.object(deploy_host, 'run_cmd')
+    def test_health_returns_1_when_no_runners(self, mock_run_cmd):
+        """No runners found = exit code 1"""
+        list_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        mock_run_cmd.side_effect = [list_result]
+
+        exit_code = self.deployer.health_check()
+        self.assertEqual(exit_code, 1)
+
+    @patch.object(deploy_host, 'run_cmd')
+    def test_health_busy_runner_is_healthy(self, mock_run_cmd):
+        """Busy runner (active + busy) should be considered healthy"""
+        list_result = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="gha-test-linux-cpu-small-1.service loaded active running\n",
+            stderr=""
+        )
+        active_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="active\n", stderr=""
+        )
+        gh_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="online/true\n", stderr=""
+        )
+        mock_run_cmd.side_effect = [list_result, active_result, gh_result]
+
+        exit_code = self.deployer.health_check()
+        self.assertEqual(exit_code, 0)
+
+
+class TestMetrics(unittest.TestCase):
+    """Test the --metrics command output format and atomic write"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "test-config.yml"
+        config = {
+            'github': {'org': 'test-org', 'prefix': 'test'},
+            'host': {
+                'runner_base': self.temp_dir,
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
+                'label': 'test-host'
+            },
+            'cache': {'base_dir': self.temp_dir, 'permissions': '755'},
+            'runners': ['cpu-small-1', 'cpu-medium-docker-1'],
+            'sizes': {
+                'small': {'cpus': 2.0, 'mem_limit': '4g'},
+                'medium': {'cpus': 6.0, 'mem_limit': '16g'},
+            },
+            'runner': {'version': '2.321.0', 'arch': 'linux-x64'}
+        }
+        with open(self.config_file, 'w') as f:
+            yaml.dump(config, f)
+        self.deployer = HostDeployer(config_path=str(self.config_file))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    @patch.object(deploy_host, 'run_cmd')
+    def test_metrics_writes_valid_prom_format(self, mock_run_cmd):
+        """Output file should contain valid Prometheus text format"""
+        list_result = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="gha-test-linux-cpu-small-1.service loaded active running\n",
+            stderr=""
+        )
+        active_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="active\n", stderr=""
+        )
+        busy_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="false\n", stderr=""
+        )
+        mock_run_cmd.side_effect = [list_result, active_result, busy_result]
+
+        output_path = os.path.join(self.temp_dir, "metrics.prom")
+        self.deployer.generate_metrics(output_path)
+
+        self.assertTrue(os.path.exists(output_path))
+        content = Path(output_path).read_text()
+
+        # Check required metrics exist
+        self.assertIn('gha_runner_up{', content)
+        self.assertIn('gha_runner_busy{', content)
+        self.assertIn('gha_runner_configured_total', content)
+        self.assertIn('gha_runner_disk_bytes_free{', content)
+
+        # Check HELP/TYPE comments
+        self.assertIn('# HELP gha_runner_up', content)
+        self.assertIn('# TYPE gha_runner_up gauge', content)
+
+    @patch.object(deploy_host, 'run_cmd')
+    def test_metrics_atomic_write_no_partial_file(self, mock_run_cmd):
+        """Metrics should be written atomically (no partial files on failure)"""
+        list_result = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="gha-test-linux-cpu-small-1.service loaded active running\n",
+            stderr=""
+        )
+        active_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="active\n", stderr=""
+        )
+        busy_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="false\n", stderr=""
+        )
+        mock_run_cmd.side_effect = [list_result, active_result, busy_result]
+
+        output_path = os.path.join(self.temp_dir, "metrics.prom")
+        self.deployer.generate_metrics(output_path)
+
+        # Verify no temp files left behind
+        temp_files = [f for f in os.listdir(self.temp_dir) if f.endswith('.prom.tmp')]
+        self.assertEqual(len(temp_files), 0, "Temp files should be cleaned up")
+
+    @patch.object(deploy_host, 'run_cmd')
+    def test_metrics_runner_up_values(self, mock_run_cmd):
+        """Active runners should have up=1, inactive should have up=0"""
+        list_result = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="gha-test-linux-cpu-small-1.service loaded active running\n",
+            stderr=""
+        )
+        active_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="active\n", stderr=""
+        )
+        busy_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="false\n", stderr=""
+        )
+        mock_run_cmd.side_effect = [list_result, active_result, busy_result]
+
+        output_path = os.path.join(self.temp_dir, "metrics.prom")
+        self.deployer.generate_metrics(output_path)
+
+        content = Path(output_path).read_text()
+        self.assertIn('gha_runner_up{name="cpu-small-1",type="cpu",size="small"} 1', content)
+
+    @patch.object(deploy_host, 'run_cmd')
+    def test_metrics_configured_total(self, mock_run_cmd):
+        """configured_total should count runners in config (not deployed)"""
+        list_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        mock_run_cmd.side_effect = [list_result]
+
+        output_path = os.path.join(self.temp_dir, "metrics.prom")
+        self.deployer.generate_metrics(output_path)
+
+        content = Path(output_path).read_text()
+        # Config has 2 runners even if none are deployed
+        self.assertIn('gha_runner_configured_total 2', content)
+
+    @patch.object(deploy_host, 'run_cmd')
+    def test_metrics_creates_output_directory(self, mock_run_cmd):
+        """generate_metrics should create the output directory if it doesn't exist"""
+        list_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        mock_run_cmd.side_effect = [list_result]
+
+        nested_path = os.path.join(self.temp_dir, "subdir", "metrics.prom")
+        self.deployer.generate_metrics(nested_path)
+
+        self.assertTrue(os.path.exists(nested_path))
+
+
+class TestPoolFilter(unittest.TestCase):
+    """Test the --pool filter for list/upgrade/health operations"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "test-config.yml"
+        config = {
+            'github': {'org': 'test-org', 'prefix': 'test'},
+            'host': {
+                'runner_base': '/srv/gha',
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
+                'label': 'test-host'
+            },
+            'cache': {'base_dir': '/srv/gha-cache', 'permissions': '755'},
+            'runners': ['cpu-small-1', 'cpu-medium-docker-1', 'gpu-max-1'],
+            'sizes': {
+                'small': {'cpus': 2.0, 'mem_limit': '4g'},
+                'medium': {'cpus': 6.0, 'mem_limit': '16g'},
+                'max': {'cpus': 16.0, 'mem_limit': '64g'},
+            },
+            'runner': {'version': '2.321.0', 'arch': 'linux-x64'}
+        }
+        with open(self.config_file, 'w') as f:
+            yaml.dump(config, f)
+        self.deployer = HostDeployer(config_path=str(self.config_file))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    @patch.object(deploy_host, 'run_cmd')
+    def test_pool_filter_matches_substring(self, mock_run_cmd):
+        """Pool filter should match runners containing the pattern"""
+        list_result = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout=(
+                "gha-test-linux-cpu-small-1.service loaded active running\n"
+                "gha-test-linux-cpu-medium-docker-1.service loaded active running\n"
+                "gha-test-linux-gpu-max-1.service loaded active running\n"
+            ),
+            stderr=""
+        )
+        active_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="active\n", stderr=""
+        )
+        mock_run_cmd.side_effect = [list_result, active_result]
+
+        runners = self.deployer._get_deployed_runners(pool="docker")
+        self.assertEqual(len(runners), 1)
+        self.assertEqual(runners[0]['name'], 'cpu-medium-docker-1')
+
+    @patch.object(deploy_host, 'run_cmd')
+    def test_pool_filter_gpu(self, mock_run_cmd):
+        """Pool filter 'gpu' should match only GPU runners"""
+        list_result = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout=(
+                "gha-test-linux-cpu-small-1.service loaded active running\n"
+                "gha-test-linux-cpu-medium-docker-1.service loaded active running\n"
+                "gha-test-linux-gpu-max-1.service loaded active running\n"
+            ),
+            stderr=""
+        )
+        active_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="active\n", stderr=""
+        )
+        mock_run_cmd.side_effect = [list_result, active_result]
+
+        runners = self.deployer._get_deployed_runners(pool="gpu")
+        self.assertEqual(len(runners), 1)
+        self.assertEqual(runners[0]['name'], 'gpu-max-1')
+
+    @patch.object(deploy_host, 'run_cmd')
+    def test_pool_none_returns_all(self, mock_run_cmd):
+        """No pool filter should return all runners"""
+        list_result = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout=(
+                "gha-test-linux-cpu-small-1.service loaded active running\n"
+                "gha-test-linux-cpu-medium-docker-1.service loaded active running\n"
+                "gha-test-linux-gpu-max-1.service loaded active running\n"
+            ),
+            stderr=""
+        )
+        active_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="active\n", stderr=""
+        )
+        mock_run_cmd.side_effect = [list_result] + [active_result] * 3
+
+        runners = self.deployer._get_deployed_runners(pool=None)
+        self.assertEqual(len(runners), 3)
+
+    @patch.object(deploy_host, 'run_cmd')
+    def test_pool_no_match_returns_empty(self, mock_run_cmd):
+        """Pool filter with no matches should return empty list"""
+        list_result = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="gha-test-linux-cpu-small-1.service loaded active running\n",
+            stderr=""
+        )
+        mock_run_cmd.side_effect = [list_result]
+
+        runners = self.deployer._get_deployed_runners(pool="nonexistent")
+        self.assertEqual(len(runners), 0)
+
+
+class TestDiskInfo(unittest.TestCase):
+    """Test disk space reporting"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "test-config.yml"
+        config = {
+            'github': {'org': 'test-org', 'prefix': 'test'},
+            'host': {
+                'runner_base': self.temp_dir,
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
+                'label': 'test-host'
+            },
+            'cache': {'base_dir': self.temp_dir, 'permissions': '755'},
+            'runners': ['cpu-small-1'],
+            'sizes': {'small': {'cpus': 2.0, 'mem_limit': '4g'}},
+            'runner': {'version': '2.321.0', 'arch': 'linux-x64'}
+        }
+        with open(self.config_file, 'w') as f:
+            yaml.dump(config, f)
+        self.deployer = HostDeployer(config_path=str(self.config_file))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_disk_info_returns_valid_structure(self):
+        """_get_disk_info should return dict with expected keys"""
+        info = self.deployer._get_disk_info(self.temp_dir)
+        self.assertIn('path', info)
+        self.assertIn('total_bytes', info)
+        self.assertIn('free_bytes', info)
+        self.assertIn('used_bytes', info)
+        self.assertIn('use_percent', info)
+        self.assertGreater(info['total_bytes'], 0)
+        self.assertGreater(info['free_bytes'], 0)
+
+    def test_disk_info_invalid_path(self):
+        """_get_disk_info should return zeros for invalid path"""
+        info = self.deployer._get_disk_info('/nonexistent/path/abc123')
+        self.assertEqual(info['total_bytes'], 0)
+        self.assertEqual(info['free_bytes'], 0)
+
+    def test_format_bytes(self):
+        """_format_bytes should produce human-readable output"""
+        self.assertEqual(HostDeployer._format_bytes(0), '0.0B')
+        self.assertIn('KB', HostDeployer._format_bytes(1536))
+        self.assertIn('MB', HostDeployer._format_bytes(1048576))
+        self.assertIn('GB', HostDeployer._format_bytes(1073741824))
+
+
 if __name__ == '__main__':
     unittest.main()
