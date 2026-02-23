@@ -112,3 +112,7 @@ systemd:
 # Sudoers configuration for workspace cleanup
 sudoers:
   path: "/etc/sudoers.d/gha-runner-cleanup"  # Path to sudoers file
+
+# Optional: Prometheus metrics output path (used by --metrics)
+# metrics:
+#   textfile_path: "/var/lib/prometheus/node-exporter/gha-runners.prom"

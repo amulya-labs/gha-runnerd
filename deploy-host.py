@@ -21,6 +21,8 @@ import shutil
 import argparse
 import time
 import re
+import tempfile
+import fnmatch
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
@@ -392,6 +394,8 @@ class HostDeployer:
 
         config.setdefault('sudoers', {})
         config['sudoers'].setdefault('path', '/etc/sudoers.d/gha-runner-cleanup')
+
+        config.setdefault('metrics', {})
 
         # Apply defaults for github scope (backward compatible: default to org)
         config['github'].setdefault('scope', 'org')
@@ -1694,58 +1698,12 @@ WantedBy=multi-user.target
         else:
             log(f"\nRemoved {len(self._removed_runners)} runner(s)", "success")
 
-    def list_runners(self):
+    def list_runners(self, pool: Optional[str] = None):
         """List all deployed runners with their status"""
         log("Listing deployed runners...\n", "info")
-        
-        prefix = self.config['github']['prefix']
-        service_pattern = f"gha-{prefix}-linux-"
-        
-        # Get list of all services matching our pattern
-        result = run_cmd(
-            ["systemctl", "list-units", "--all", "--no-legend", f"{service_pattern}*"],
-            sudo=True,
-            capture=True,
-            check=False
-        )
-        
-        runners_found = []
-        for line in result.stdout.splitlines():
-            if not line.strip():
-                continue
-            
-            parts = line.split()
-            if len(parts) < 4:
-                continue
-                
-            service_full = parts[0]
-            if not service_full.startswith(service_pattern):
-                continue
-            
-            # Extract runner name
-            runner_name = service_full.replace(service_pattern, "").replace(".service", "")
-            
-            # Get service status
-            status_result = run_cmd(
-                ["systemctl", "is-active", service_full],
-                sudo=True,
-                capture=True,
-                check=False
-            )
-            status = status_result.stdout.strip()
-            
-            # Get runner path
-            runner_path = Path(f"{self.config['host']['runner_base']}/{prefix}-linux-{runner_name}")
-            exists = runner_path.exists()
-            
-            runners_found.append({
-                'name': runner_name,
-                'service': service_full,
-                'status': status,
-                'path': runner_path,
-                'exists': exists
-            })
-        
+
+        runners_found = self._get_deployed_runners(pool=pool)
+
         if not runners_found:
             log("No runners found", "warning")
             return
@@ -1862,45 +1820,16 @@ WantedBy=multi-user.target
         log(f"\nRunner '{registered_name}' fully removed (GitHub + local)", "success")
         return True
 
-    def upgrade_runners(self):
+    def upgrade_runners(self, pool: Optional[str] = None):
         """Upgrade runner binaries for all deployed runners"""
         log("Upgrading runner binaries...\n", "info")
-        
-        prefix = self.config['github']['prefix']
-        service_pattern = f"gha-{prefix}-linux-"
-        
-        # Get list of all services
-        result = run_cmd(
-            ["systemctl", "list-units", "--all", "--no-legend", f"{service_pattern}*"],
-            sudo=True,
-            capture=True,
-            check=False
-        )
-        
-        runners_to_upgrade = []
-        for line in result.stdout.splitlines():
-            if not line.strip():
-                continue
-            
-            parts = line.split()
-            if len(parts) < 1:
-                continue
-                
-            service_full = parts[0]
-            if not service_full.startswith(service_pattern):
-                continue
-            
-            # Extract runner name
-            runner_name = service_full.replace(service_pattern, "").replace(".service", "")
-            runner_path = Path(f"{self.config['host']['runner_base']}/{prefix}-linux-{runner_name}")
-            
-            if runner_path.exists():
-                runners_to_upgrade.append({
-                    'name': runner_name,
-                    'service': service_full,
-                    'path': runner_path
-                })
-        
+
+        deployed = self._get_deployed_runners(pool=pool)
+        runners_to_upgrade = [
+            {'name': r['name'], 'service': r['service'], 'path': r['path']}
+            for r in deployed if r['exists']
+        ]
+
         if not runners_to_upgrade:
             log("No runners found to upgrade", "warning")
             return
@@ -2002,6 +1931,287 @@ WantedBy=multi-user.target
         
         log(f"\n✅ Upgraded {upgraded_count}/{len(runners_to_upgrade)} runner(s)", "success")
 
+    def _get_deployed_runners(self, pool: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get list of deployed runners from systemd, optionally filtered by pool pattern.
+
+        Returns a list of dicts with keys: name, service, status, path, exists.
+        If pool is given, only runners whose name contains the pattern (or matches
+        as a glob) are returned.
+        """
+        prefix = self.config['github']['prefix']
+        service_pattern = f"gha-{prefix}-linux-"
+
+        result = run_cmd(
+            ["systemctl", "list-units", "--all", "--no-legend", f"{service_pattern}*"],
+            sudo=True,
+            capture=True,
+            check=False
+        )
+
+        runners = []
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+
+            service_full = parts[0]
+            if not service_full.startswith(service_pattern):
+                continue
+
+            runner_name = service_full.replace(service_pattern, "").replace(".service", "")
+
+            # Apply pool filter
+            if pool and not fnmatch.fnmatch(runner_name, f"*{pool}*"):
+                continue
+
+            status_result = run_cmd(
+                ["systemctl", "is-active", service_full],
+                sudo=True,
+                capture=True,
+                check=False
+            )
+            status = status_result.stdout.strip()
+
+            runner_path = Path(f"{self.config['host']['runner_base']}/{prefix}-linux-{runner_name}")
+            runners.append({
+                'name': runner_name,
+                'service': service_full,
+                'status': status,
+                'path': runner_path,
+                'exists': runner_path.exists(),
+            })
+
+        return runners
+
+    def _get_runner_github_status(self, runner_name: str) -> str:
+        """Query GitHub API for runner status (online/offline/busy).
+
+        Returns 'online', 'offline', 'busy', or 'unknown'.
+        """
+        prefix = self.config['github']['prefix']
+        registered_name = f"{prefix}-linux-{runner_name}"
+        gh_prefix = self._gh_prefix()
+        api_runners = f"{self.api_base}/actions/runners"
+
+        try:
+            result = run_cmd(
+                gh_prefix + ["gh", "api", api_runners,
+                             "--paginate", "--jq",
+                             f'.runners[] | select(.name == "{registered_name}") '
+                             f'| (.status + "/" + (.busy | tostring))'],
+                capture=True,
+                check=False
+            )
+            value = result.stdout.strip() if result else ""
+            if not value:
+                return "unknown"
+            status, busy = value.split("/", 1)
+            if busy == "true":
+                return "busy"
+            return status  # "online" or "offline"
+        except Exception:
+            return "unknown"
+
+    def _get_disk_info(self, path: str) -> Dict[str, Any]:
+        """Get disk space info for a path using os.statvfs."""
+        try:
+            st = os.statvfs(path)
+            total = st.f_frsize * st.f_blocks
+            free = st.f_frsize * st.f_bavail
+            used = total - free
+            return {
+                'path': path,
+                'total_bytes': total,
+                'free_bytes': free,
+                'used_bytes': used,
+                'use_percent': round((used / total) * 100, 1) if total > 0 else 0,
+            }
+        except OSError:
+            return {
+                'path': path,
+                'total_bytes': 0,
+                'free_bytes': 0,
+                'used_bytes': 0,
+                'use_percent': 0,
+            }
+
+    @staticmethod
+    def _format_bytes(n: int) -> str:
+        """Format bytes as human-readable string."""
+        for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+            if abs(n) < 1024:
+                return f"{n:.1f}{unit}"
+            n /= 1024
+        return f"{n:.1f}PB"
+
+    def health_check(self, pool: Optional[str] = None, json_output: bool = False):
+        """Check health of deployed runners: systemd status, GitHub status, disk space.
+
+        Returns exit code: 0 = all healthy, 1 = problems detected.
+        """
+        runners = self._get_deployed_runners(pool=pool)
+        problems = []
+
+        # Gather runner health
+        runner_health = []
+        for r in runners:
+            gh_status = self._get_runner_github_status(r['name'])
+            healthy = r['status'] == 'active' and gh_status in ('online', 'busy')
+            entry = {
+                'name': r['name'],
+                'service': r['service'],
+                'systemd': r['status'],
+                'github': gh_status,
+                'path_exists': r['exists'],
+                'healthy': healthy,
+            }
+            runner_health.append(entry)
+            if not healthy:
+                problems.append(f"{r['name']}: systemd={r['status']} github={gh_status}")
+
+        # Gather disk info
+        disk_paths = [self.config['host']['runner_base']]
+        cache_dir = self.config.get('cache', {}).get('base_dir')
+        if cache_dir and cache_dir != disk_paths[0]:
+            disk_paths.append(cache_dir)
+
+        disk_info = [self._get_disk_info(p) for p in disk_paths]
+        for d in disk_info:
+            if d['use_percent'] > 90:
+                problems.append(f"Disk {d['path']}: {d['use_percent']}% used")
+
+        if json_output:
+            output = {
+                'healthy': len(problems) == 0,
+                'runners': runner_health,
+                'disk': disk_info,
+                'problems': problems,
+            }
+            print(json.dumps(output, indent=2))
+            return 0 if not problems else 1
+
+        # Print human-readable output
+        if not runners:
+            log("No runners found", "warning")
+            return 1
+
+        log("Runner Health Check\n", "header")
+        log(f"{'Runner Name':<30} {'Systemd':<12} {'GitHub':<10} {'Healthy':<8}", "header")
+        log("-" * 65, "header")
+
+        for r in runner_health:
+            if r['healthy']:
+                status_ansi = "\033[32m"  # green
+                health_str = "yes"
+            else:
+                status_ansi = "\033[31m"  # red
+                health_str = "NO"
+            reset_ansi = "\033[0m"
+
+            systemd_field = f"{r['systemd']:<12}"
+            github_field = f"{r['github']:<10}"
+            health_field = f"{health_str:<8}"
+            row = (
+                f"{r['name']:<30} "
+                f"{systemd_field} "
+                f"{github_field} "
+                f"{status_ansi}{health_field}{reset_ansi}"
+            )
+            print(row)
+
+        # Disk space
+        log(f"\nDisk Space:", "header")
+        for d in disk_info:
+            free_str = self._format_bytes(d['free_bytes'])
+            total_str = self._format_bytes(d['total_bytes'])
+            pct = d['use_percent']
+            warn = " (WARNING: >90%)" if pct > 90 else ""
+            log(f"  {d['path']}: {free_str} free / {total_str} total ({pct}% used){warn}", "info")
+
+        # Summary
+        total = len(runner_health)
+        healthy_count = sum(1 for r in runner_health if r['healthy'])
+        log(f"\nSummary: {healthy_count}/{total} runners healthy", "success" if not problems else "warning")
+
+        if problems:
+            log(f"\nProblems detected:", "error")
+            for p in problems:
+                log(f"  - {p}", "error")
+
+        return 0 if not problems else 1
+
+    def generate_metrics(self, output_path: str):
+        """Generate Prometheus textfile-format metrics and write atomically.
+
+        Writes a .prom file suitable for node_exporter's textfile collector.
+        """
+        runners = self._get_deployed_runners()
+        lines = []
+
+        # Runner status metrics
+        lines.append("# HELP gha_runner_up Whether the runner systemd service is active.")
+        lines.append("# TYPE gha_runner_up gauge")
+        for r in runners:
+            parsed = r['name'].split('-')
+            if len(parsed) == 3:
+                rtype, size, _ = parsed
+            elif len(parsed) == 4:
+                rtype, size = parsed[0], parsed[1]
+            else:
+                rtype, size = "unknown", "unknown"
+            up = 1 if r['status'] == 'active' else 0
+            lines.append(
+                f'gha_runner_up{{name="{r["name"]}",type="{rtype}",size="{size}"}} {up}'
+            )
+
+        # Busy status (requires GitHub API)
+        lines.append("# HELP gha_runner_busy Whether the runner is currently executing a job.")
+        lines.append("# TYPE gha_runner_busy gauge")
+        for r in runners:
+            busy = self._is_runner_busy(r['name'])
+            val = 1 if busy else 0
+            lines.append(f'gha_runner_busy{{name="{r["name"]}"}} {val}')
+
+        # Total configured runners
+        lines.append("# HELP gha_runner_configured_total Total number of configured runners.")
+        lines.append("# TYPE gha_runner_configured_total gauge")
+        lines.append(f"gha_runner_configured_total {len(self.runners)}")
+
+        # Disk space
+        lines.append("# HELP gha_runner_disk_bytes_free Free disk space in bytes.")
+        lines.append("# TYPE gha_runner_disk_bytes_free gauge")
+        disk_paths = [self.config['host']['runner_base']]
+        cache_dir = self.config.get('cache', {}).get('base_dir')
+        if cache_dir and cache_dir != disk_paths[0]:
+            disk_paths.append(cache_dir)
+        for p in disk_paths:
+            info = self._get_disk_info(p)
+            lines.append(f'gha_runner_disk_bytes_free{{path="{p}"}} {info["free_bytes"]}')
+
+        lines.append("")  # trailing newline
+
+        content = "\n".join(lines)
+
+        # Atomic write: write to temp file in same directory, then rename
+        output_dir = os.path.dirname(output_path) or "."
+        os.makedirs(output_dir, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=output_dir, suffix=".prom.tmp")
+        try:
+            with os.fdopen(fd, 'w') as f:
+                f.write(content)
+            os.rename(tmp_path, output_path)
+            log(f"Metrics written to {output_path}", "success")
+        except Exception:
+            # Clean up temp file on failure
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
     def deploy(self):
         """Main deployment workflow"""
         log("Starting GitHub Actions Host-Based Runner Deployment", "header")
@@ -2062,6 +2272,20 @@ Examples:
   # Upgrade all runner binaries
   ./deploy-host.py --upgrade
 
+  # Check health of all runners
+  ./deploy-host.py --health
+
+  # Health check with JSON output
+  ./deploy-host.py --health --json
+
+  # Generate Prometheus metrics for node_exporter
+  ./deploy-host.py --metrics
+
+  # Filter operations by pool (name pattern)
+  ./deploy-host.py --list --pool docker
+  ./deploy-host.py --upgrade --pool gpu
+  ./deploy-host.py --health --pool cpu-small
+
   # Deploy with verbose output
   ./deploy-host.py --verbose
 
@@ -2108,6 +2332,31 @@ Note: The script will prompt for sudo password when needed for system operations
         help='Upgrade runner binaries for all deployed runners'
     )
     parser.add_argument(
+        '--health',
+        action='store_true',
+        help='Check health of all deployed runners (systemd + GitHub status + disk)'
+    )
+    parser.add_argument(
+        '--metrics',
+        action='store_true',
+        help='Generate Prometheus textfile metrics (.prom) for node_exporter'
+    )
+    parser.add_argument(
+        '--metrics-path',
+        default='/var/lib/prometheus/node-exporter/gha-runners.prom',
+        help='Output path for --metrics (default: /var/lib/prometheus/node-exporter/gha-runners.prom)'
+    )
+    parser.add_argument(
+        '--json',
+        action='store_true',
+        help='Output in JSON format (use with --health)'
+    )
+    parser.add_argument(
+        '--pool',
+        metavar='PATTERN',
+        help='Filter runners by name pattern (use with --list, --upgrade, --health)'
+    )
+    parser.add_argument(
         '--verbose', '-v',
         action='store_true',
         help='Enable verbose output with detailed logging'
@@ -2131,13 +2380,35 @@ Note: The script will prompt for sudo password when needed for system operations
         log("Dry-run mode enabled - no changes will be made", "info")
     if args.force and not args.remove:
         log("--force has no effect without --remove", "warning")
+    if getattr(args, 'json', False) and not args.health:
+        log("--json has no effect without --health", "warning")
+    if args.pool and not (args.list or args.upgrade or args.health):
+        log("--pool has no effect without --list, --upgrade, or --health", "warning")
 
     try:
         deployer = HostDeployer(config_path=args.config)
 
+        # Handle --health command
+        if args.health:
+            exit_code = deployer.health_check(
+                pool=args.pool,
+                json_output=getattr(args, 'json', False),
+            )
+            sys.exit(exit_code)
+
+        # Handle --metrics command
+        if args.metrics:
+            metrics_path = args.metrics_path
+            # Check config for override
+            cfg_path = deployer.config.get('metrics', {}).get('textfile_path')
+            if cfg_path:
+                metrics_path = cfg_path
+            deployer.generate_metrics(metrics_path)
+            sys.exit(0)
+
         # Handle --list command
         if args.list:
-            deployer.list_runners()
+            deployer.list_runners(pool=args.pool)
             sys.exit(0)
 
         # Handle --remove command
@@ -2149,7 +2420,7 @@ Note: The script will prompt for sudo password when needed for system operations
 
         # Handle --upgrade command
         if args.upgrade:
-            deployer.upgrade_runners()
+            deployer.upgrade_runners(pool=args.pool)
             sys.exit(0)
 
         # Handle --validate command
