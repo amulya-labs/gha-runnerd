@@ -1016,9 +1016,18 @@ class HostDeployer:
                 log_dry_run(f"Register runner {runner.registered_name} with GitHub")
                 log_dry_run(f"Labels: {runner.labels}")
             else:
+                # Force-remove .runner immediately before config.sh in the SAME
+                # shell — eliminates any gap where .runner could reappear between
+                # the cleanup step and the registration step.
+                config_cmd_str = ' '.join(shlex.quote(arg) for arg in config_cmd)
+                shell_cmd = (
+                    f"cd {shlex.quote(str(runner_path))}"
+                    f" && rm -f .runner .credentials .credentials_rsaparams"
+                    f" && {config_cmd_str}"
+                )
                 result = run_cmd(
                     ["sudo", "-u", f"#{uid}", "-g", f"#{gid}",
-                     "bash", "-c", f"cd {shlex.quote(str(runner_path))} && {' '.join(shlex.quote(arg) for arg in config_cmd)}"],
+                     "bash", "-c", shell_cmd],
                     check=False, capture=True,
                 )
                 if result.returncode != 0:
@@ -1029,8 +1038,8 @@ class HostDeployer:
                     # Show targeted advice based on the actual error
                     out_lower = output.lower()
                     if "already configured" in out_lower:
-                        log("The runner's .runner file was not fully cleaned up.", "error")
-                        log(f"Try manually: sudo rm -f {runner_path}/.runner", "error")
+                        log("The .runner file could not be removed (unexpected).", "error")
+                        log(f"Try manually: sudo rm -f {runner_path}/.runner && re-run deploy", "error")
                     elif "runner group" in out_lower:
                         enterprise = self.config['github'].get('enterprise', '')
                         log(f"Runner group '{runner_group_name}' was not found.", "error")
@@ -1064,7 +1073,12 @@ class HostDeployer:
             log(f"Registered {runner.registered_name}", "success")
 
     def _unconfigure_runner(self, runner: RunnerConfig, token: str):
-        """Remove runner configuration"""
+        """Stop runner service and try to deregister from GitHub.
+
+        This is best-effort cleanup. The critical file removal (.runner etc.)
+        happens atomically in register_runner's bash -c command, right before
+        config.sh runs, to avoid any gap where files could reappear.
+        """
         runner_path = Path(runner.runner_path)
 
         log(f"Removing existing configuration for {runner.registered_name}...", "info")
@@ -1078,7 +1092,10 @@ class HostDeployer:
             check=False,
         )
 
-        # Try to remove via config.sh
+        # Try to cleanly deregister via config.sh remove (best-effort).
+        # This tells GitHub to remove the runner. If it fails (e.g. 404
+        # because the token scope changed), we continue — the --replace
+        # flag during registration handles re-registration.
         remove_cmd = [
             str(runner_path / "config.sh"),
             "remove",
@@ -1095,28 +1112,6 @@ class HostDeployer:
             )
         except Exception:
             log("Failed to cleanly remove runner, will force cleanup", "warning")
-
-        # Force-remove config files as the runner user (not root — avoids
-        # issues with NFS root_squash or other sudo restrictions on the
-        # runner directory).
-        config_files = ".runner .credentials .credentials_rsaparams .service .labels"
-        run_cmd(
-            ["sudo", "-u", f"#{uid}", "bash", "-c",
-             f"cd {shlex.quote(str(runner_path))} && rm -f {config_files}"],
-            check=False,
-        )
-
-        # Verify .runner is actually gone — if not, the next config.sh
-        # will refuse with "already configured"
-        check = run_cmd(
-            ["sudo", "-u", f"#{uid}", "test", "-f", str(runner_path / ".runner")],
-            check=False, capture=True,
-        )
-        if check and check.returncode == 0:
-            log(f".runner still exists after cleanup in {runner_path}", "error")
-            log("Attempting removal as root...", "warning")
-            run_cmd(["rm", "-f", str(runner_path / ".runner")],
-                    sudo=True, sudo_reason="force-removing .runner as root")
 
     def generate_hook_content(self, runner: RunnerConfig):
         """Generate the pre-job cleanup hook script content"""
