@@ -846,17 +846,17 @@ class TestEnterpriseScopeConfig(unittest.TestCase):
         deployer = HostDeployer(config_path=str(self.config_file))
         self.assertEqual(deployer.config['github']['runner_group'], {})
 
-    def test_runner_group_id_parsed(self):
-        """runner_group.id is parsed from config"""
+    def test_runner_group_name_parsed(self):
+        """runner_group.name is parsed from config"""
         cfg = self._base_config(
             scope='enterprise',
             enterprise='my-enterprise',
-            runner_group={'id': 42},
+            runner_group={'name': 'my-runners'},
         )
         self._write_config(cfg)
         deployer = HostDeployer(config_path=str(self.config_file))
         self.assertEqual(
-            deployer.config['github']['runner_group']['id'], 42
+            deployer.config['github']['runner_group']['name'], 'my-runners'
         )
 
     def test_runner_group_allow_orgs_not_supported(self):
@@ -864,7 +864,7 @@ class TestEnterpriseScopeConfig(unittest.TestCase):
         cfg = self._base_config(
             scope='enterprise',
             enterprise='my-enterprise',
-            runner_group={'id': 42, 'allow_orgs': ['org-a', 'org-b']},
+            runner_group={'name': 'my-runners', 'allow_orgs': ['org-a', 'org-b']},
         )
         self._write_config(cfg)
         deployer = HostDeployer(config_path=str(self.config_file))
@@ -931,16 +931,16 @@ class TestEnterpriseScopeValidation(unittest.TestCase):
     def test_allow_orgs_rejected_with_ui_link(self):
         """allow_orgs is rejected — org access must be managed in GitHub UI"""
         cfg = self._enterprise_config(
-            runner_group={'id': 1, 'allow_orgs': ['org-a']},
+            runner_group={'name': 'my-runners', 'allow_orgs': ['org-a']},
         )
         self._write_config(cfg)
         deployer = HostDeployer(config_path=str(self.config_file))
         self.assertFalse(deployer.validate_config())
 
-    def test_runner_group_with_id_only_passes(self):
-        """runner_group with just id (no allow_orgs) passes validation"""
+    def test_runner_group_with_name_only_passes(self):
+        """runner_group with just name (no allow_orgs) passes validation"""
         cfg = self._enterprise_config(
-            runner_group={'id': 1},
+            runner_group={'name': 'my-runners'},
         )
         self._write_config(cfg)
         deployer = HostDeployer(config_path=str(self.config_file))
@@ -1426,21 +1426,21 @@ class TestConfigValueValidation(unittest.TestCase):
         cfg['host']['docker_user_gid'] = "1003"
         self.assertFalse(self._validate(cfg))
 
-    # -- runner_group.id --
+    # -- runner_group.name --
 
-    def test_runner_group_id_string_rejected(self):
+    def test_runner_group_name_non_string_rejected(self):
         cfg = self._base_config()
         cfg['github']['scope'] = 'enterprise'
         cfg['github']['enterprise'] = 'test-enterprise'
-        cfg['github']['runner_group'] = {'id': "42"}
+        cfg['github']['runner_group'] = {'name': 42}
         self.assertFalse(self._validate(cfg))
 
-    def test_runner_group_id_zero_rejected(self):
+    def test_runner_group_name_string_accepted(self):
         cfg = self._base_config()
         cfg['github']['scope'] = 'enterprise'
         cfg['github']['enterprise'] = 'test-enterprise'
-        cfg['github']['runner_group'] = {'id': 0}
-        self.assertFalse(self._validate(cfg))
+        cfg['github']['runner_group'] = {'name': 'my-runners'}
+        self.assertTrue(self._validate(cfg))
 
     # -- cpus --
 

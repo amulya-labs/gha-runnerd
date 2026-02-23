@@ -9,7 +9,7 @@ github:
   # Assign runners to a runner group (create in GitHub UI first)
   # Manage org access at: https://github.com/enterprises/{enterprise}/settings/actions/runner-groups
   runner_group:
-    id: 1                        # Enterprise runner group ID
+    name: "my-runners"           # Runner group name (must exist in enterprise)
 
 host:
   label: "ent-runners"

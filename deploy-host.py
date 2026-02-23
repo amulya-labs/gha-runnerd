@@ -436,14 +436,18 @@ class HostDeployer:
 
             # runner_group validation
             runner_group = self.config.get('github', {}).get('runner_group', {})
+            rg_name = runner_group.get('name')
+            if rg_name is not None and not isinstance(rg_name, str):
+                errors.append(
+                    f"runner_group.name must be a string, got {rg_name!r}"
+                )
             if runner_group.get('allow_orgs'):
                 enterprise = self.config.get('github', {}).get('enterprise', '')
-                rg_id = runner_group.get('id', '')
                 errors.append(
                     "runner_group.allow_orgs is not supported — "
-                    "manage organization access in the GitHub UI instead: "
+                    "manage organization access in the GitHub UI: "
                     f"https://github.com/enterprises/{enterprise}"
-                    f"/settings/actions/runner-groups/{rg_id}"
+                    f"/settings/actions/runner-groups"
                 )
         else:
             org = self.config.get('github', {}).get('org', '')
@@ -478,13 +482,8 @@ class HostDeployer:
                     "must be alphanumeric with hyphens"
                 )
 
-        # Validate runner_group fields
+        # Validate runner_group fields (already checked name/allow_orgs above for enterprise)
         runner_group = self.config.get('github', {}).get('runner_group', {})
-        rg_id = runner_group.get('id')
-        if rg_id is not None and not is_positive_int(rg_id):
-            errors.append(
-                f"runner_group.id must be a positive integer, got {rg_id!r}"
-            )
         # Check host configuration
         host_config = self.config.get('host', {})
         runner_base = host_config.get('runner_base')
@@ -668,8 +667,8 @@ class HostDeployer:
             if scope == 'enterprise':
                 log(f"  • Enterprise: {self.config.get('github', {}).get('enterprise', '')}", "info")
                 runner_group = self.config.get('github', {}).get('runner_group', {})
-                if runner_group.get('id'):
-                    log(f"  • Runner group ID: {runner_group['id']}", "info")
+                if runner_group.get('name'):
+                    log(f"  • Runner group: {runner_group['name']}", "info")
             else:
                 log(f"  • Organization: {self.config.get('github', {}).get('org', '')}", "info")
             log(f"  • Prefix: {prefix}", "info")
@@ -1002,9 +1001,9 @@ class HostDeployer:
             ]
 
             # Add runner group if configured (enterprise scope)
-            runner_group_id = self.config['github'].get('runner_group', {}).get('id')
-            if runner_group_id:
-                config_cmd.extend(["--runnergroup", str(runner_group_id)])
+            runner_group_name = self.config['github'].get('runner_group', {}).get('name')
+            if runner_group_name:
+                config_cmd.extend(["--runnergroup", runner_group_name])
 
             # Run as the runner user
             uid = self.config['host']['docker_user_uid']
@@ -1031,8 +1030,8 @@ class HostDeployer:
                     log("Common causes:", "error")
                     log("  • Registration token is invalid or expired", "error")
                     log("  • Token was already used (tokens are single-use)", "error")
-                    if runner_group_id:
-                        log(f"  • Runner group ID {runner_group_id} does not exist in the enterprise", "error")
+                    if runner_group_name:
+                        log(f"  • Runner group '{runner_group_name}' does not exist in the enterprise", "error")
                     log("  • Network connectivity issues", "error")
                     sys.exit(1)
 
