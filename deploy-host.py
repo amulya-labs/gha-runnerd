@@ -1020,9 +1020,13 @@ class HostDeployer:
                 # shell — eliminates any gap where .runner could reappear between
                 # the cleanup step and the registration step.
                 config_cmd_str = ' '.join(shlex.quote(arg) for arg in config_cmd)
+                rp = shlex.quote(str(runner_path))
                 shell_cmd = (
-                    f"cd {shlex.quote(str(runner_path))}"
-                    f" && rm -f .runner .credentials .credentials_rsaparams"
+                    f"cd {rp}"
+                    f" && echo 'pwd:' && pwd"
+                    f" && ls -la .runner 2>&1 || true"
+                    f" && rm -fv .runner .credentials .credentials_rsaparams"
+                    f" && (test -f .runner && echo 'ERROR: .runner still exists after rm' || echo '.runner removed ok')"
                     f" && {config_cmd_str}"
                 )
                 result = run_cmd(
