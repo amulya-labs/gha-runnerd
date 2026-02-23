@@ -1046,18 +1046,27 @@ class HostDeployer:
     def _unconfigure_runner(self, runner: RunnerConfig, token: str):
         """Remove runner configuration"""
         runner_path = Path(runner.runner_path)
-        
+
         log(f"Removing existing configuration for {runner.registered_name}...", "info")
-        
+
+        # Stop the service first so the running process can't interfere
+        service_name = f"{runner.service_name}.service"
+        run_cmd(
+            ["systemctl", "stop", service_name],
+            sudo=True,
+            sudo_reason=f"stopping {service_name} before reconfiguration",
+            check=False,
+        )
+
         # Try to remove via config.sh
         remove_cmd = [
             str(runner_path / "config.sh"),
             "remove",
             "--token", token
         ]
-        
+
         uid = self.config['host']['docker_user_uid']
-        
+
         try:
             run_cmd(
                 ["sudo", "-u", f"#{uid}", "bash", "-c",
@@ -1066,16 +1075,16 @@ class HostDeployer:
             )
         except Exception:
             log("Failed to cleanly remove runner, will force cleanup", "warning")
-        
-        # Clean up config files (owned by runner user, need sudo)
+
+        # Force-remove config files (owned by runner user, need sudo).
+        # Always attempt removal — don't rely on exists() which runs as
+        # the deploying user and may miss files in restricted directories.
         for f in [".runner", ".credentials", ".credentials_rsaparams", ".service", ".labels"]:
-            file_path = runner_path / f
-            if file_path.exists():
-                run_cmd(
-                    ["rm", "-f", str(file_path)],
-                    sudo=True,
-                    sudo_reason=f"removing runner config file {f}",
-                )
+            run_cmd(
+                ["rm", "-f", str(runner_path / f)],
+                sudo=True,
+                sudo_reason=f"removing runner config file {f}",
+            )
 
     def generate_hook_content(self, runner: RunnerConfig):
         """Generate the pre-job cleanup hook script content"""
