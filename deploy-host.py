@@ -1120,13 +1120,16 @@ class HostDeployer:
         uid = self.config['host']['docker_user_uid']
 
         try:
-            run_cmd(
+            result = run_cmd(
                 ["sudo", "-u", f"#{uid}", "bash", "-c",
                  f"cd {shlex.quote(str(runner_path))} && {' '.join(shlex.quote(arg) for arg in remove_cmd)}"],
-                check=False
+                check=False, capture=True,
             )
+            if result and result.returncode != 0:
+                log("Could not deregister old runner (will re-register with --replace)", "warning")
+                log_debug(f"config.sh remove output: {(result.stdout or '') + (result.stderr or '')}")
         except Exception:
-            log("Failed to cleanly remove runner, will force cleanup", "warning")
+            log("Could not deregister old runner (will re-register with --replace)", "warning")
 
     def generate_hook_content(self, runner: RunnerConfig):
         """Generate the pre-job cleanup hook script content"""
