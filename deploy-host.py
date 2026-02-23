@@ -1026,13 +1026,21 @@ class HostDeployer:
                     log(f"Failed to register runner {runner.registered_name}", "error")
                     if output.strip():
                         log(f"config.sh output:\n{output.strip()}", "error")
-                    log("", "error")
-                    log("Common causes:", "error")
-                    log("  • Registration token is invalid or expired", "error")
-                    log("  • Token was already used (tokens are single-use)", "error")
-                    if runner_group_name:
-                        log(f"  • Runner group '{runner_group_name}' does not exist in the enterprise", "error")
-                    log("  • Network connectivity issues", "error")
+                    # Show targeted advice based on the actual error
+                    out_lower = output.lower()
+                    if "already configured" in out_lower:
+                        log("The runner's .runner file was not fully cleaned up.", "error")
+                        log(f"Try manually: sudo rm -f {runner_path}/.runner", "error")
+                    elif "runner group" in out_lower:
+                        enterprise = self.config['github'].get('enterprise', '')
+                        log(f"Runner group '{runner_group_name}' was not found.", "error")
+                        log(f"Check: https://github.com/enterprises/{enterprise}/settings/actions/runner-groups", "error")
+                    elif "unauthorized" in out_lower or "401" in output:
+                        log("Registration token is invalid or expired.", "error")
+                    elif "not found" in out_lower or "404" in output:
+                        log("The registration URL was not found (check scope/enterprise/org config).", "error")
+                    else:
+                        log("Re-run with --verbose for more details.", "info")
                     sys.exit(1)
 
             # Save labels (runner dir is owned by runner user, write via sudo)
