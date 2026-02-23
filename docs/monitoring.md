@@ -113,15 +113,11 @@ Ensure node_exporter has the textfile collector enabled:
 
 #### 2. Set up a cron job
 
+The default output path is `/tmp/gha-runners.prom`. For node_exporter, point it at the textfile directory:
+
 ```bash
 # /etc/cron.d/gha-runner-metrics
-* * * * * root /path/to/deploy-host.py --metrics --config /path/to/config.yml
-```
-
-Or with a custom output path:
-
-```bash
-* * * * * root /path/to/deploy-host.py --metrics --metrics-path /custom/path/gha-runners.prom
+* * * * * root /path/to/deploy-host.py --metrics --metrics-path /var/lib/prometheus/node-exporter/gha-runners.prom --config /path/to/config.yml
 ```
 
 You can also set the path in `config.yml`:

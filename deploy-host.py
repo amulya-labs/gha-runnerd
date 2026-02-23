@@ -2356,8 +2356,8 @@ Note: The script will prompt for sudo password when needed for system operations
     )
     parser.add_argument(
         '--metrics-path',
-        default='/var/lib/prometheus/node-exporter/gha-runners.prom',
-        help='Output path for --metrics (default: /var/lib/prometheus/node-exporter/gha-runners.prom)'
+        default='/tmp/gha-runners.prom',
+        help='Output path for --metrics (default: /tmp/gha-runners.prom)'
     )
     parser.add_argument(
         '--json',
