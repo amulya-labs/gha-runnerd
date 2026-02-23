@@ -166,6 +166,59 @@ def check_requirements():
     log("Requirements OK", "success")
 
 
+# ---------------------------------------------------------------------------
+# Validation helpers (pure predicates, no side effects)
+# ---------------------------------------------------------------------------
+
+def is_non_negative_int(value) -> bool:
+    """int >= 0, rejects bool/float/str."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def is_positive_int(value) -> bool:
+    """int > 0, rejects bool/float/str."""
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def is_positive_number(value) -> bool:
+    """int or float > 0, rejects bool."""
+    if isinstance(value, bool):
+        return False
+    return isinstance(value, (int, float)) and value > 0
+
+
+def is_valid_octal_string(value) -> bool:
+    """3-4 digit octal string, e.g. '755' or '0755'."""
+    return isinstance(value, str) and bool(re.match(r'^[0-7]{3,4}$', value))
+
+
+def is_valid_systemd_memory(value) -> bool:
+    """Digits followed by a single unit letter (K/M/G/T), e.g. '4G' or '512M'."""
+    return isinstance(value, str) and bool(re.match(r'^\d+[KMGTkmgt]$', value))
+
+
+def is_valid_service_name_part(value) -> bool:
+    """Lowercase letter followed by lowercase alphanumeric/hyphens."""
+    return isinstance(value, str) and bool(re.match(r'^[a-z][a-z0-9-]*$', value))
+
+
+def is_absolute_path(value) -> bool:
+    """String starting with '/'."""
+    return isinstance(value, str) and value.startswith('/')
+
+
+def is_valid_slug(value) -> bool:
+    """Alphanumeric (may start with letter or digit) plus hyphens."""
+    return isinstance(value, str) and bool(re.match(r'^[a-zA-Z0-9][a-zA-Z0-9-]*$', value))
+
+
+def is_valid_url_template(value, placeholders) -> bool:
+    """String containing all required {placeholder} markers."""
+    if not isinstance(value, str):
+        return False
+    return all(f'{{{p}}}' in value for p in placeholders)
+
+
 class RunnerConfig:
     """Parsed runner configuration"""
 
@@ -398,24 +451,103 @@ class HostDeployer:
         prefix = self.config.get('github', {}).get('prefix', '')
         if not prefix or prefix == '':
             errors.append("GitHub prefix not set in config.yml")
+        elif not is_valid_service_name_part(prefix):
+            errors.append(
+                f"GitHub prefix '{prefix}' is invalid — "
+                "must be lowercase, start with a letter, and contain only [a-z0-9-]"
+            )
+
+        # Validate org/enterprise slug format (beyond placeholder checks above)
+        if scope == 'enterprise':
+            ent_val = self.config.get('github', {}).get('enterprise', '')
+            if ent_val and ent_val not in ['your-enterprise', ''] and not is_valid_slug(ent_val):
+                errors.append(
+                    f"GitHub enterprise slug '{ent_val}' is invalid — "
+                    "must be alphanumeric with hyphens"
+                )
+        else:
+            org_val = self.config.get('github', {}).get('org', '')
+            if org_val and org_val not in ['your-org', ''] and not is_valid_slug(org_val):
+                errors.append(
+                    f"GitHub org '{org_val}' is invalid — "
+                    "must be alphanumeric with hyphens"
+                )
+
+        # Validate runner_group fields
+        runner_group = self.config.get('github', {}).get('runner_group', {})
+        rg_id = runner_group.get('id')
+        if rg_id is not None and not is_positive_int(rg_id):
+            errors.append(
+                f"runner_group.id must be a positive integer, got {rg_id!r}"
+            )
+        for org_item in runner_group.get('allow_orgs', []):
+            if not is_valid_slug(org_item):
+                errors.append(
+                    f"runner_group.allow_orgs contains invalid slug '{org_item}'"
+                )
 
         # Check host configuration
         host_config = self.config.get('host', {})
-        if not host_config.get('runner_base'):
+        runner_base = host_config.get('runner_base')
+        if not runner_base:
             errors.append("Host runner_base not configured")
+        elif not is_absolute_path(runner_base):
+            errors.append(
+                f"Host runner_base '{runner_base}' must be an absolute path"
+            )
         if not host_config.get('label'):
             errors.append("Host label not configured")
-        if not host_config.get('docker_user_uid'):
+
+        # UID/GID: accept 0 (root) — use `is None` instead of `not value`
+        uid_val = host_config.get('docker_user_uid')
+        if uid_val is None:
             errors.append("Host docker_user_uid not configured")
-        if not host_config.get('docker_user_gid'):
+        elif not is_non_negative_int(uid_val):
+            errors.append(
+                f"Host docker_user_uid must be a non-negative integer, got {uid_val!r}"
+            )
+
+        gid_val = host_config.get('docker_user_gid')
+        if gid_val is None:
             errors.append("Host docker_user_gid not configured")
+        elif not is_non_negative_int(gid_val):
+            errors.append(
+                f"Host docker_user_gid must be a non-negative integer, got {gid_val!r}"
+            )
+
+        if host_config.get('docker_socket') is not None:
+            warnings.append(
+                "host.docker_socket is configured but not used by deploy-host.py, "
+                "may be removed in future"
+            )
 
         # Check runner configuration
         runner_config = self.config.get('runner', {})
         if not runner_config.get('version'):
             errors.append("Runner version not configured")
-        if not runner_config.get('arch'):
+
+        arch = runner_config.get('arch')
+        if not arch:
             errors.append("Runner architecture not configured")
+        else:
+            known_arches = [
+                'linux-x64', 'linux-arm64', 'linux-arm',
+                'osx-x64', 'osx-arm64', 'win-x64',
+            ]
+            if arch not in known_arches:
+                warnings.append(
+                    f"Runner arch '{arch}' is not a known value — "
+                    f"expected one of: {', '.join(known_arches)}"
+                )
+
+        # Validate download_url_template
+        url_tpl = runner_config.get('download_url_template')
+        if url_tpl is not None:
+            if not is_valid_url_template(url_tpl, ['version', 'arch']):
+                errors.append(
+                    "runner.download_url_template must contain both "
+                    "'{version}' and '{arch}' placeholders"
+                )
 
         # Validate runners list
         if not self.config.get('runners'):
@@ -453,6 +585,66 @@ class HostDeployer:
                     warnings.append(f"Size '{size_name}' missing 'mem_limit' (recommended)")
                 if 'pids_limit' not in size_config and size_name != 'max':
                     warnings.append(f"Size '{size_name}' missing 'pids_limit' (recommended)")
+
+                # Validate value types/formats when present
+                cpus_val = size_config.get('cpus')
+                if cpus_val is not None and not is_positive_number(cpus_val):
+                    errors.append(
+                        f"Size '{size_name}' cpus must be a positive number, got {cpus_val!r}"
+                    )
+
+                mem_val = size_config.get('mem_limit')
+                if mem_val is not None and not is_valid_systemd_memory(str(mem_val)):
+                    errors.append(
+                        f"Size '{size_name}' mem_limit must be a systemd memory value "
+                        f"like '4G' or '512M', got {mem_val!r}"
+                    )
+
+                pids_val = size_config.get('pids_limit')
+                if pids_val is not None and not is_positive_int(pids_val):
+                    errors.append(
+                        f"Size '{size_name}' pids_limit must be a positive integer, got {pids_val!r}"
+                    )
+
+        # Validate cache configuration
+        cache_config = self.config.get('cache', {})
+        cache_base = cache_config.get('base_dir')
+        if cache_base is not None and not is_absolute_path(cache_base):
+            errors.append(
+                f"cache.base_dir '{cache_base}' must be an absolute path"
+            )
+        cache_perms = cache_config.get('permissions')
+        if cache_perms is not None and not is_valid_octal_string(str(cache_perms)):
+            errors.append(
+                f"cache.permissions must be a valid octal string like '755' or '0755', "
+                f"got {cache_perms!r}"
+            )
+
+        # Validate systemd configuration
+        systemd_config = self.config.get('systemd', {})
+        valid_restart_policies = [
+            'always', 'on-failure', 'on-success', 'on-abnormal',
+            'on-watchdog', 'on-abort', 'no',
+        ]
+        restart_policy = systemd_config.get('restart_policy')
+        if restart_policy is not None and restart_policy not in valid_restart_policies:
+            errors.append(
+                f"systemd.restart_policy '{restart_policy}' is invalid — "
+                f"must be one of: {', '.join(valid_restart_policies)}"
+            )
+        restart_sec = systemd_config.get('restart_sec')
+        if restart_sec is not None and not is_positive_int(restart_sec):
+            errors.append(
+                f"systemd.restart_sec must be a positive integer, got {restart_sec!r}"
+            )
+
+        # Validate sudoers configuration
+        sudoers_config = self.config.get('sudoers', {})
+        sudoers_path = sudoers_config.get('path')
+        if sudoers_path is not None and not is_absolute_path(sudoers_path):
+            errors.append(
+                f"sudoers.path '{sudoers_path}' must be an absolute path"
+            )
 
         # Check for duplicate runner names
         runner_names = self.config.get('runners', [])

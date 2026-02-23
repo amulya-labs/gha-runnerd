@@ -1229,5 +1229,393 @@ class TestBusyRunnerProtection(unittest.TestCase):
         self.assertEqual(mock_run_cmd.call_count, 2)
 
 
+class TestValidationHelpers(unittest.TestCase):
+    """Unit tests for validation helper predicates"""
+
+    # -- is_non_negative_int --
+    def test_non_negative_int_zero(self):
+        self.assertTrue(deploy_host.is_non_negative_int(0))
+
+    def test_non_negative_int_positive(self):
+        self.assertTrue(deploy_host.is_non_negative_int(1003))
+
+    def test_non_negative_int_rejects_negative(self):
+        self.assertFalse(deploy_host.is_non_negative_int(-1))
+
+    def test_non_negative_int_rejects_bool(self):
+        self.assertFalse(deploy_host.is_non_negative_int(True))
+        self.assertFalse(deploy_host.is_non_negative_int(False))
+
+    def test_non_negative_int_rejects_float(self):
+        self.assertFalse(deploy_host.is_non_negative_int(1.0))
+
+    def test_non_negative_int_rejects_string(self):
+        self.assertFalse(deploy_host.is_non_negative_int("1003"))
+
+    # -- is_positive_int --
+    def test_positive_int_valid(self):
+        self.assertTrue(deploy_host.is_positive_int(1))
+        self.assertTrue(deploy_host.is_positive_int(42))
+
+    def test_positive_int_rejects_zero(self):
+        self.assertFalse(deploy_host.is_positive_int(0))
+
+    def test_positive_int_rejects_negative(self):
+        self.assertFalse(deploy_host.is_positive_int(-5))
+
+    def test_positive_int_rejects_bool(self):
+        self.assertFalse(deploy_host.is_positive_int(True))
+
+    def test_positive_int_rejects_string(self):
+        self.assertFalse(deploy_host.is_positive_int("10"))
+
+    # -- is_positive_number --
+    def test_positive_number_int(self):
+        self.assertTrue(deploy_host.is_positive_number(2))
+
+    def test_positive_number_float(self):
+        self.assertTrue(deploy_host.is_positive_number(2.5))
+
+    def test_positive_number_rejects_zero(self):
+        self.assertFalse(deploy_host.is_positive_number(0))
+
+    def test_positive_number_rejects_negative(self):
+        self.assertFalse(deploy_host.is_positive_number(-1.5))
+
+    def test_positive_number_rejects_bool(self):
+        self.assertFalse(deploy_host.is_positive_number(True))
+
+    def test_positive_number_rejects_string(self):
+        self.assertFalse(deploy_host.is_positive_number("2.5"))
+
+    # -- is_valid_octal_string --
+    def test_octal_string_three_digits(self):
+        self.assertTrue(deploy_host.is_valid_octal_string("755"))
+
+    def test_octal_string_four_digits(self):
+        self.assertTrue(deploy_host.is_valid_octal_string("0755"))
+
+    def test_octal_string_rejects_non_octal(self):
+        self.assertFalse(deploy_host.is_valid_octal_string("999"))
+
+    def test_octal_string_rejects_too_short(self):
+        self.assertFalse(deploy_host.is_valid_octal_string("75"))
+
+    def test_octal_string_rejects_int(self):
+        self.assertFalse(deploy_host.is_valid_octal_string(755))
+
+    # -- is_valid_systemd_memory --
+    def test_systemd_memory_valid(self):
+        self.assertTrue(deploy_host.is_valid_systemd_memory("4G"))
+        self.assertTrue(deploy_host.is_valid_systemd_memory("512M"))
+        self.assertTrue(deploy_host.is_valid_systemd_memory("4g"))
+
+    def test_systemd_memory_rejects_bad_suffix(self):
+        self.assertFalse(deploy_host.is_valid_systemd_memory("4gb"))
+        self.assertFalse(deploy_host.is_valid_systemd_memory("4GB"))
+
+    def test_systemd_memory_rejects_no_suffix(self):
+        self.assertFalse(deploy_host.is_valid_systemd_memory("1024"))
+
+    # -- is_valid_service_name_part --
+    def test_service_name_valid(self):
+        self.assertTrue(deploy_host.is_valid_service_name_part("my"))
+        self.assertTrue(deploy_host.is_valid_service_name_part("prod-runners"))
+
+    def test_service_name_rejects_uppercase(self):
+        self.assertFalse(deploy_host.is_valid_service_name_part("MyPrefix"))
+
+    def test_service_name_rejects_starting_digit(self):
+        self.assertFalse(deploy_host.is_valid_service_name_part("1prefix"))
+
+    def test_service_name_rejects_spaces(self):
+        self.assertFalse(deploy_host.is_valid_service_name_part("my prefix"))
+
+    # -- is_absolute_path --
+    def test_absolute_path_valid(self):
+        self.assertTrue(deploy_host.is_absolute_path("/srv/gha"))
+
+    def test_absolute_path_rejects_relative(self):
+        self.assertFalse(deploy_host.is_absolute_path("srv/gha"))
+        self.assertFalse(deploy_host.is_absolute_path("./srv/gha"))
+
+    # -- is_valid_slug --
+    def test_slug_valid(self):
+        self.assertTrue(deploy_host.is_valid_slug("my-org"))
+        self.assertTrue(deploy_host.is_valid_slug("org123"))
+
+    def test_slug_rejects_spaces(self):
+        self.assertFalse(deploy_host.is_valid_slug("my org"))
+
+    def test_slug_rejects_starting_hyphen(self):
+        self.assertFalse(deploy_host.is_valid_slug("-org"))
+
+    # -- is_valid_url_template --
+    def test_url_template_valid(self):
+        tpl = "https://example.com/{version}/runner-{arch}.tar.gz"
+        self.assertTrue(deploy_host.is_valid_url_template(tpl, ['version', 'arch']))
+
+    def test_url_template_missing_placeholder(self):
+        tpl = "https://example.com/{version}/runner.tar.gz"
+        self.assertFalse(deploy_host.is_valid_url_template(tpl, ['version', 'arch']))
+
+    def test_url_template_rejects_non_string(self):
+        self.assertFalse(deploy_host.is_valid_url_template(123, ['version']))
+
+
+class TestConfigValueValidation(unittest.TestCase):
+    """Integration tests: invalid config values detected by validate_config()"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "test-config.yml"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _base_config(self):
+        """Return a known-good config dict."""
+        return {
+            'github': {'org': 'test-org', 'prefix': 'test'},
+            'host': {
+                'runner_base': '/srv/gha',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
+                'label': 'test-host',
+            },
+            'cache': {'base_dir': '/srv/gha-cache', 'permissions': '755'},
+            'runners': ['cpu-small-1'],
+            'sizes': {'small': {'cpus': 2.0, 'mem_limit': '4G', 'pids_limit': 2048}},
+            'runner': {'version': '2.321.0', 'arch': 'linux-x64'},
+        }
+
+    def _validate(self, config):
+        """Write config and run validate_config(), return True/False."""
+        with open(self.config_file, 'w') as f:
+            yaml.dump(config, f)
+        deployer = HostDeployer(config_path=str(self.config_file))
+        return deployer.validate_config()
+
+    # -- UID/GID --
+
+    def test_uid_zero_accepted(self):
+        cfg = self._base_config()
+        cfg['host']['docker_user_uid'] = 0
+        self.assertTrue(self._validate(cfg))
+
+    def test_uid_string_rejected(self):
+        cfg = self._base_config()
+        cfg['host']['docker_user_uid'] = "1003"
+        self.assertFalse(self._validate(cfg))
+
+    def test_uid_negative_rejected(self):
+        cfg = self._base_config()
+        cfg['host']['docker_user_uid'] = -1
+        self.assertFalse(self._validate(cfg))
+
+    def test_uid_float_rejected(self):
+        cfg = self._base_config()
+        cfg['host']['docker_user_uid'] = 1003.0
+        self.assertFalse(self._validate(cfg))
+
+    def test_gid_zero_accepted(self):
+        cfg = self._base_config()
+        cfg['host']['docker_user_gid'] = 0
+        self.assertTrue(self._validate(cfg))
+
+    def test_gid_string_rejected(self):
+        cfg = self._base_config()
+        cfg['host']['docker_user_gid'] = "1003"
+        self.assertFalse(self._validate(cfg))
+
+    # -- runner_group.id --
+
+    def test_runner_group_id_string_rejected(self):
+        cfg = self._base_config()
+        cfg['github']['scope'] = 'enterprise'
+        cfg['github']['enterprise'] = 'test-enterprise'
+        cfg['github']['runner_group'] = {'id': "42"}
+        self.assertFalse(self._validate(cfg))
+
+    def test_runner_group_id_zero_rejected(self):
+        cfg = self._base_config()
+        cfg['github']['scope'] = 'enterprise'
+        cfg['github']['enterprise'] = 'test-enterprise'
+        cfg['github']['runner_group'] = {'id': 0}
+        self.assertFalse(self._validate(cfg))
+
+    # -- cpus --
+
+    def test_cpus_string_rejected(self):
+        cfg = self._base_config()
+        cfg['sizes']['small']['cpus'] = "2"
+        self.assertFalse(self._validate(cfg))
+
+    def test_cpus_negative_rejected(self):
+        cfg = self._base_config()
+        cfg['sizes']['small']['cpus'] = -1.0
+        self.assertFalse(self._validate(cfg))
+
+    def test_cpus_null_accepted(self):
+        cfg = self._base_config()
+        cfg['sizes']['small']['cpus'] = None
+        self.assertTrue(self._validate(cfg))
+
+    # -- mem_limit --
+
+    def test_mem_limit_bad_suffix_rejected(self):
+        cfg = self._base_config()
+        cfg['sizes']['small']['mem_limit'] = "4gb"
+        self.assertFalse(self._validate(cfg))
+
+    def test_mem_limit_valid_accepted(self):
+        cfg = self._base_config()
+        cfg['sizes']['small']['mem_limit'] = "4G"
+        self.assertTrue(self._validate(cfg))
+
+    def test_mem_limit_null_accepted(self):
+        cfg = self._base_config()
+        cfg['sizes']['small']['mem_limit'] = None
+        self.assertTrue(self._validate(cfg))
+
+    # -- pids_limit --
+
+    def test_pids_limit_float_rejected(self):
+        cfg = self._base_config()
+        cfg['sizes']['small']['pids_limit'] = 2048.5
+        self.assertFalse(self._validate(cfg))
+
+    def test_pids_limit_null_accepted(self):
+        cfg = self._base_config()
+        cfg['sizes']['small']['pids_limit'] = None
+        self.assertTrue(self._validate(cfg))
+
+    # -- prefix --
+
+    def test_prefix_spaces_rejected(self):
+        cfg = self._base_config()
+        cfg['github']['prefix'] = "my prefix"
+        self.assertFalse(self._validate(cfg))
+
+    def test_prefix_uppercase_rejected(self):
+        cfg = self._base_config()
+        cfg['github']['prefix'] = "MyPrefix"
+        self.assertFalse(self._validate(cfg))
+
+    # -- runner_base --
+
+    def test_runner_base_relative_rejected(self):
+        cfg = self._base_config()
+        cfg['host']['runner_base'] = "srv/gha"
+        self.assertFalse(self._validate(cfg))
+
+    # -- cache.permissions --
+
+    def test_cache_permissions_999_rejected(self):
+        cfg = self._base_config()
+        cfg['cache']['permissions'] = "999"
+        self.assertFalse(self._validate(cfg))
+
+    def test_cache_permissions_0755_accepted(self):
+        cfg = self._base_config()
+        cfg['cache']['permissions'] = "0755"
+        self.assertTrue(self._validate(cfg))
+
+    def test_cache_permissions_yaml_int_coercion(self):
+        """YAML may parse unquoted 755 as int — str() conversion handles it."""
+        cfg = self._base_config()
+        cfg['cache']['permissions'] = 755  # int, not str
+        self.assertTrue(self._validate(cfg))
+
+    # -- restart_policy --
+
+    def test_restart_policy_invalid_rejected(self):
+        cfg = self._base_config()
+        cfg['systemd'] = {'restart_policy': 'sometimes', 'restart_sec': 10}
+        self.assertFalse(self._validate(cfg))
+
+    def test_restart_policy_valid_accepted(self):
+        cfg = self._base_config()
+        cfg['systemd'] = {'restart_policy': 'on-failure', 'restart_sec': 10}
+        self.assertTrue(self._validate(cfg))
+
+    # -- restart_sec --
+
+    def test_restart_sec_string_rejected(self):
+        cfg = self._base_config()
+        cfg['systemd'] = {'restart_policy': 'always', 'restart_sec': "10"}
+        self.assertFalse(self._validate(cfg))
+
+    # -- download_url_template --
+
+    def test_download_url_template_missing_placeholders_rejected(self):
+        cfg = self._base_config()
+        cfg['runner']['download_url_template'] = "https://example.com/runner.tar.gz"
+        self.assertFalse(self._validate(cfg))
+
+    def test_download_url_template_valid_accepted(self):
+        cfg = self._base_config()
+        cfg['runner']['download_url_template'] = (
+            "https://example.com/v{version}/runner-{arch}.tar.gz"
+        )
+        self.assertTrue(self._validate(cfg))
+
+    # -- org/enterprise slugs --
+
+    def test_org_slug_spaces_rejected(self):
+        cfg = self._base_config()
+        cfg['github']['org'] = "my org"
+        self.assertFalse(self._validate(cfg))
+
+    def test_enterprise_slug_spaces_rejected(self):
+        cfg = self._base_config()
+        cfg['github']['scope'] = 'enterprise'
+        cfg['github']['enterprise'] = 'my enterprise'
+        self.assertFalse(self._validate(cfg))
+
+    # -- allow_orgs --
+
+    def test_allow_orgs_invalid_slug_rejected(self):
+        cfg = self._base_config()
+        cfg['github']['scope'] = 'enterprise'
+        cfg['github']['enterprise'] = 'test-enterprise'
+        cfg['github']['runner_group'] = {
+            'id': 1,
+            'allow_orgs': ['good-org', 'bad org'],
+        }
+        self.assertFalse(self._validate(cfg))
+
+    # -- cache.base_dir --
+
+    def test_cache_base_dir_relative_rejected(self):
+        cfg = self._base_config()
+        cfg['cache']['base_dir'] = 'cache/dir'
+        self.assertFalse(self._validate(cfg))
+
+    # -- sudoers.path --
+
+    def test_sudoers_path_relative_rejected(self):
+        cfg = self._base_config()
+        cfg['sudoers'] = {'path': 'sudoers.d/gha'}
+        self.assertFalse(self._validate(cfg))
+
+    # -- docker_socket warning --
+
+    def test_docker_socket_produces_warning_but_passes(self):
+        """docker_socket triggers a warning but does not fail validation."""
+        cfg = self._base_config()
+        cfg['host']['docker_socket'] = '/var/run/docker.sock'
+        self.assertTrue(self._validate(cfg))
+
+    # -- unknown arch warning --
+
+    def test_unknown_arch_produces_warning_but_passes(self):
+        """Unknown arch triggers a warning but does not fail validation."""
+        cfg = self._base_config()
+        cfg['runner']['arch'] = 'linux-riscv64'
+        self.assertTrue(self._validate(cfg))
+
+
 if __name__ == '__main__':
     unittest.main()
