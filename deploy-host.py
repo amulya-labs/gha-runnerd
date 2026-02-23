@@ -1016,21 +1016,19 @@ class HostDeployer:
                 log_dry_run(f"Register runner {runner.registered_name} with GitHub")
                 log_dry_run(f"Labels: {runner.labels}")
             else:
-                # Force-remove .runner immediately before config.sh in the SAME
-                # shell — eliminates any gap where .runner could reappear between
-                # the cleanup step and the registration step.
+                # Remove ALL runner config files before config.sh in the SAME
+                # shell — the runner checks both .runner and .runner_migrated
+                # in IsConfigured(), so both must be gone.
                 config_cmd_str = ' '.join(shlex.quote(arg) for arg in config_cmd)
                 rp = shlex.quote(str(runner_path))
+                config_files = (
+                    ".runner .runner_migrated"
+                    " .credentials .credentials_migrated .credentials_rsaparams"
+                    " .credential_store .setup_info"
+                )
                 shell_cmd = (
                     f"cd {rp}"
-                    f" && echo 'pwd:' && pwd && echo 'pwd -P:' && pwd -P"
-                    f" && echo '--- all .runner files under /srv/gha ---'"
-                    f" && find /srv/gha -maxdepth 3 -name .runner -ls 2>&1 || true"
-                    f" && echo '--- config.sh real path ---'"
-                    f" && readlink -f {rp}/config.sh 2>&1 || true"
-                    f" && rm -fv .runner .credentials .credentials_rsaparams"
-                    f" && echo '--- after rm: all .runner files ---'"
-                    f" && find /srv/gha -maxdepth 3 -name .runner -ls 2>&1 || true"
+                    f" && rm -f {config_files}"
                     f" && {config_cmd_str}"
                 )
                 result = run_cmd(
