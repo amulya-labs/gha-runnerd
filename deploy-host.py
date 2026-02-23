@@ -1216,7 +1216,9 @@ Defaults:#{uid} !requiretty
         except subprocess.CalledProcessError:
             temp_path.unlink()
             log("Sudoers file validation failed!", "error")
-            raise
+            log("The generated sudoers content did not pass visudo -c validation.", "error")
+            log("This is likely a bug in deploy-host.py — please report it.", "error")
+            sys.exit(1)
 
         # Move into place with sudo
         run_cmd(
@@ -2210,10 +2212,23 @@ Note: The script will prompt for sudo password when needed for system operations
     except KeyboardInterrupt:
         log("\nDeployment cancelled by user", "warning")
         sys.exit(1)
+    except subprocess.CalledProcessError as e:
+        log(f"\nCommand failed: {' '.join(shlex.quote(str(a)) for a in e.cmd)}", "error")
+        if e.stderr:
+            log(f"stderr: {e.stderr.strip()}", "error")
+        if e.stdout:
+            log(f"stdout: {e.stdout.strip()}", "error")
+        log("Re-run with --verbose for more details.", "info")
+        if VERBOSE:
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
     except Exception as e:
-        log(f"Deployment failed: {e}", "error")
-        import traceback
-        traceback.print_exc()
+        log(f"\nDeployment failed: {e}", "error")
+        log("Re-run with --verbose for more details.", "info")
+        if VERBOSE:
+            import traceback
+            traceback.print_exc()
         sys.exit(1)
 
 
