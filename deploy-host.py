@@ -967,27 +967,32 @@ class HostDeployer:
         log_debug(f"Runner name: {runner.registered_name}")
         log_debug(f"Labels: {runner.labels}")
 
-        # Check if runner needs (re)configuration
-        runner_file = runner_path / ".runner"
-        credentials_file = runner_path / ".credentials"
+        # Check if runner needs (re)configuration.
+        # Use sudo to read files — they're owned by the runner user and
+        # may be inaccessible to the deploying user.
         labels_file = runner_path / ".labels"
 
         need_config = True
 
-        if not DRY_RUN and runner_file.exists() and credentials_file.exists():
-            # Check if labels match
-            if labels_file.exists():
-                current_labels = labels_file.read_text().strip()
+        if not DRY_RUN:
+            result = run_cmd(
+                ["cat", str(labels_file)],
+                sudo=True, check=False, capture=True,
+            )
+            if result and result.returncode == 0:
+                current_labels = result.stdout.strip()
                 log_debug(f"Current labels: {current_labels}")
                 if current_labels == runner.labels:
                     log(f"Runner {runner.registered_name} already configured with correct labels", "info")
                     need_config = False
                 else:
                     log(f"Labels changed, reconfiguring runner...", "info")
-                    # Remove existing configuration
-                    self._unconfigure_runner(runner, token)
-        
+
         if need_config or DRY_RUN:
+            # Always ensure clean state before (re)configuring
+            if not DRY_RUN:
+                self._unconfigure_runner(runner, token)
+
             # Run config.sh
             config_cmd = [
                 str(runner_path / "config.sh"),
