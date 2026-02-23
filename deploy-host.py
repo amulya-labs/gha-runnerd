@@ -1088,15 +1088,27 @@ class HostDeployer:
         except Exception:
             log("Failed to cleanly remove runner, will force cleanup", "warning")
 
-        # Force-remove config files (owned by runner user, need sudo).
-        # Always attempt removal — don't rely on exists() which runs as
-        # the deploying user and may miss files in restricted directories.
-        for f in [".runner", ".credentials", ".credentials_rsaparams", ".service", ".labels"]:
-            run_cmd(
-                ["rm", "-f", str(runner_path / f)],
-                sudo=True,
-                sudo_reason=f"removing runner config file {f}",
-            )
+        # Force-remove config files as the runner user (not root — avoids
+        # issues with NFS root_squash or other sudo restrictions on the
+        # runner directory).
+        config_files = ".runner .credentials .credentials_rsaparams .service .labels"
+        run_cmd(
+            ["sudo", "-u", f"#{uid}", "bash", "-c",
+             f"cd {shlex.quote(str(runner_path))} && rm -f {config_files}"],
+            check=False,
+        )
+
+        # Verify .runner is actually gone — if not, the next config.sh
+        # will refuse with "already configured"
+        check = run_cmd(
+            ["sudo", "-u", f"#{uid}", "test", "-f", str(runner_path / ".runner")],
+            check=False, capture=True,
+        )
+        if check and check.returncode == 0:
+            log(f".runner still exists after cleanup in {runner_path}", "error")
+            log("Attempting removal as root...", "warning")
+            run_cmd(["rm", "-f", str(runner_path / ".runner")],
+                    sudo=True, sudo_reason="force-removing .runner as root")
 
     def generate_hook_content(self, runner: RunnerConfig):
         """Generate the pre-job cleanup hook script content"""
