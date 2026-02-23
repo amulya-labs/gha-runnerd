@@ -1,0 +1,59 @@
+# Enterprise-scoped runner configuration
+# Runners register under a GitHub Enterprise and can be shared
+# across multiple organizations via runner groups.
+
+github:
+  scope: "enterprise"
+  enterprise: "your-enterprise"  # GitHub Enterprise slug
+  prefix: "ent"
+  # Assign runners to a runner group and grant org access
+  runner_group:
+    id: 1                        # Enterprise runner group ID
+    allow_orgs:                  # Orgs that can use this runner group
+      - "org-a"
+      - "org-b"
+
+host:
+  label: "ent-runners"
+  runner_base: "/srv/gha"
+  docker_socket: "/var/run/docker.sock"
+  docker_user_uid: 1003
+  docker_user_gid: 1003
+
+cache:
+  base_dir: "/srv/gha-cache"
+  permissions: "755"
+
+runners:
+  - "cpu-small-1"
+  - "cpu-small-2"
+  - "cpu-medium-1"
+  - "cpu-large-1"
+
+sizes:
+  small:
+    cpus: 2.0
+    mem_limit: "4g"
+    pids_limit: 2048
+  medium:
+    cpus: 6.0
+    mem_limit: "16g"
+    pids_limit: 4096
+  large:
+    cpus: 12.0
+    mem_limit: "32g"
+    pids_limit: 8192
+
+runner:
+  version: "2.329.0"
+  arch: "linux-x64"
+
+github_api:
+  enforce_labels: true
+
+systemd:
+  restart_policy: "always"
+  restart_sec: 10
+
+sudoers:
+  path: "/etc/sudoers.d/gha-runner-cleanup"

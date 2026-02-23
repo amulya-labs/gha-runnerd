@@ -719,5 +719,334 @@ class TestConfigDefaults(unittest.TestCase):
             os.unlink(config_path)
 
 
+class TestEnterpriseScopeConfig(unittest.TestCase):
+    """Test enterprise scope configuration parsing and validation"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "test-config.yml"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _write_config(self, config_dict):
+        with open(self.config_file, 'w') as f:
+            yaml.dump(config_dict, f)
+
+    def _base_config(self, **github_overrides):
+        """Return a valid base config dict with optional github overrides."""
+        github = {
+            'org': 'test-org',
+            'prefix': 'test',
+        }
+        github.update(github_overrides)
+        return {
+            'github': github,
+            'host': {
+                'runner_base': '/srv/gha',
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
+                'label': 'test-host',
+            },
+            'cache': {'base_dir': '/srv/gha-cache', 'permissions': '755'},
+            'runners': ['cpu-small-1'],
+            'sizes': {'small': {'cpus': 2.0, 'mem_limit': '4g'}},
+            'runner': {'version': '2.321.0', 'arch': 'linux-x64'},
+        }
+
+    # ----- backward compatibility -----
+
+    def test_default_scope_is_org(self):
+        """Existing configs without scope field default to org"""
+        self._write_config(self._base_config())
+        deployer = HostDeployer(config_path=str(self.config_file))
+        self.assertEqual(deployer.config['github']['scope'], 'org')
+
+    def test_explicit_org_scope(self):
+        """Explicitly setting scope=org works"""
+        self._write_config(self._base_config(scope='org'))
+        deployer = HostDeployer(config_path=str(self.config_file))
+        self.assertEqual(deployer.scope, 'org')
+        self.assertEqual(deployer.api_base, '/orgs/test-org')
+        self.assertEqual(deployer.runner_url, 'https://github.com/test-org')
+
+    # ----- enterprise scope -----
+
+    def test_enterprise_scope_loads(self):
+        """Enterprise scope config loads correctly"""
+        cfg = self._base_config(
+            scope='enterprise',
+            enterprise='my-enterprise',
+        )
+        self._write_config(cfg)
+        deployer = HostDeployer(config_path=str(self.config_file))
+        self.assertEqual(deployer.scope, 'enterprise')
+        self.assertEqual(
+            deployer.config['github']['enterprise'], 'my-enterprise'
+        )
+
+    def test_enterprise_api_base(self):
+        """Enterprise scope returns enterprise API base path"""
+        cfg = self._base_config(
+            scope='enterprise',
+            enterprise='my-enterprise',
+        )
+        self._write_config(cfg)
+        deployer = HostDeployer(config_path=str(self.config_file))
+        self.assertEqual(
+            deployer.api_base, '/enterprises/my-enterprise'
+        )
+
+    def test_enterprise_runner_url(self):
+        """Enterprise scope returns enterprise runner URL"""
+        cfg = self._base_config(
+            scope='enterprise',
+            enterprise='my-enterprise',
+        )
+        self._write_config(cfg)
+        deployer = HostDeployer(config_path=str(self.config_file))
+        self.assertEqual(
+            deployer.runner_url,
+            'https://github.com/enterprises/my-enterprise',
+        )
+
+    def test_enterprise_scope_missing_enterprise_slug(self):
+        """Enterprise scope without enterprise slug exits with error"""
+        cfg = self._base_config(scope='enterprise')
+        # Remove any enterprise key that might have been set
+        cfg['github'].pop('enterprise', None)
+        self._write_config(cfg)
+        with self.assertRaises(SystemExit):
+            HostDeployer(config_path=str(self.config_file))
+
+    def test_invalid_scope_value(self):
+        """Invalid scope value exits with error"""
+        cfg = self._base_config(scope='invalid')
+        self._write_config(cfg)
+        with self.assertRaises(SystemExit):
+            HostDeployer(config_path=str(self.config_file))
+
+    def test_org_scope_missing_org(self):
+        """Org scope without org exits with error"""
+        cfg = self._base_config(scope='org')
+        cfg['github'].pop('org', None)
+        self._write_config(cfg)
+        with self.assertRaises(SystemExit):
+            HostDeployer(config_path=str(self.config_file))
+
+    # ----- runner_group -----
+
+    def test_runner_group_defaults_to_empty(self):
+        """runner_group defaults to empty dict if not specified"""
+        self._write_config(self._base_config())
+        deployer = HostDeployer(config_path=str(self.config_file))
+        self.assertEqual(deployer.config['github']['runner_group'], {})
+
+    def test_runner_group_id_parsed(self):
+        """runner_group.id is parsed from config"""
+        cfg = self._base_config(
+            scope='enterprise',
+            enterprise='my-enterprise',
+            runner_group={'id': 42},
+        )
+        self._write_config(cfg)
+        deployer = HostDeployer(config_path=str(self.config_file))
+        self.assertEqual(
+            deployer.config['github']['runner_group']['id'], 42
+        )
+
+    def test_runner_group_allow_orgs_parsed(self):
+        """runner_group.allow_orgs is parsed from config"""
+        cfg = self._base_config(
+            scope='enterprise',
+            enterprise='my-enterprise',
+            runner_group={'id': 42, 'allow_orgs': ['org-a', 'org-b']},
+        )
+        self._write_config(cfg)
+        deployer = HostDeployer(config_path=str(self.config_file))
+        self.assertEqual(
+            deployer.config['github']['runner_group']['allow_orgs'],
+            ['org-a', 'org-b'],
+        )
+
+
+class TestEnterpriseScopeValidation(unittest.TestCase):
+    """Test enterprise-specific validation rules in validate_config"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "test-config.yml"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _write_config(self, config_dict):
+        with open(self.config_file, 'w') as f:
+            yaml.dump(config_dict, f)
+
+    def _enterprise_config(self, **github_overrides):
+        github = {
+            'scope': 'enterprise',
+            'enterprise': 'test-enterprise',
+            'prefix': 'test',
+        }
+        github.update(github_overrides)
+        return {
+            'github': github,
+            'host': {
+                'runner_base': '/srv/gha',
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
+                'label': 'test-host',
+            },
+            'cache': {'base_dir': '/srv/gha-cache', 'permissions': '755'},
+            'runners': ['cpu-small-1'],
+            'sizes': {'small': {'cpus': 2.0, 'mem_limit': '4g'}},
+            'runner': {'version': '2.321.0', 'arch': 'linux-x64'},
+        }
+
+    def test_valid_enterprise_config_passes_validation(self):
+        """Valid enterprise config passes validation"""
+        self._write_config(self._enterprise_config())
+        deployer = HostDeployer(config_path=str(self.config_file))
+        self.assertTrue(deployer.validate_config())
+
+    def test_enterprise_placeholder_slug_fails_validation(self):
+        """Enterprise config with placeholder slug fails validation"""
+        cfg = self._enterprise_config(enterprise='your-enterprise')
+        self._write_config(cfg)
+        deployer = HostDeployer(config_path=str(self.config_file))
+        self.assertFalse(deployer.validate_config())
+
+    def test_enterprise_empty_slug_caught_at_load(self):
+        """Enterprise config with empty slug is caught at load time"""
+        cfg = self._enterprise_config(enterprise='')
+        self._write_config(cfg)
+        with self.assertRaises(SystemExit):
+            HostDeployer(config_path=str(self.config_file))
+
+    def test_allow_orgs_without_group_id_fails_validation(self):
+        """Specifying allow_orgs without runner_group.id fails validation"""
+        cfg = self._enterprise_config(
+            runner_group={'allow_orgs': ['org-a']},
+        )
+        self._write_config(cfg)
+        deployer = HostDeployer(config_path=str(self.config_file))
+        self.assertFalse(deployer.validate_config())
+
+    def test_runner_group_with_id_and_allow_orgs_passes(self):
+        """runner_group with both id and allow_orgs passes validation"""
+        cfg = self._enterprise_config(
+            runner_group={'id': 1, 'allow_orgs': ['org-a']},
+        )
+        self._write_config(cfg)
+        deployer = HostDeployer(config_path=str(self.config_file))
+        self.assertTrue(deployer.validate_config())
+
+    def test_org_scope_placeholder_still_fails(self):
+        """Org scope with placeholder 'your-org' still fails validation"""
+        cfg = {
+            'github': {'scope': 'org', 'org': 'your-org', 'prefix': 'test'},
+            'host': {
+                'runner_base': '/srv/gha',
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
+                'label': 'test-host',
+            },
+            'cache': {'base_dir': '/srv/gha-cache', 'permissions': '755'},
+            'runners': ['cpu-small-1'],
+            'sizes': {'small': {'cpus': 2.0, 'mem_limit': '4g'}},
+            'runner': {'version': '2.321.0', 'arch': 'linux-x64'},
+        }
+        self._write_config(cfg)
+        deployer = HostDeployer(config_path=str(self.config_file))
+        self.assertFalse(deployer.validate_config())
+
+
+class TestEnterpriseApiPaths(unittest.TestCase):
+    """Test that scope-aware API paths are generated correctly"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "test-config.yml"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _write_config(self, config_dict):
+        with open(self.config_file, 'w') as f:
+            yaml.dump(config_dict, f)
+
+    def _make_deployer(self, scope='org', **extra_github):
+        github = {'prefix': 'test'}
+        if scope == 'org':
+            github['scope'] = 'org'
+            github['org'] = 'test-org'
+        else:
+            github['scope'] = 'enterprise'
+            github['enterprise'] = 'test-enterprise'
+        github.update(extra_github)
+
+        cfg = {
+            'github': github,
+            'host': {
+                'runner_base': '/srv/gha',
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
+                'label': 'test-host',
+            },
+            'cache': {'base_dir': '/srv/gha-cache', 'permissions': '755'},
+            'runners': ['cpu-small-1'],
+            'sizes': {'small': {'cpus': 2.0, 'mem_limit': '4g'}},
+            'runner': {'version': '2.321.0', 'arch': 'linux-x64'},
+        }
+        self._write_config(cfg)
+        return HostDeployer(config_path=str(self.config_file))
+
+    def test_org_api_base(self):
+        deployer = self._make_deployer('org')
+        self.assertEqual(deployer.api_base, '/orgs/test-org')
+
+    def test_enterprise_api_base(self):
+        deployer = self._make_deployer('enterprise')
+        self.assertEqual(deployer.api_base, '/enterprises/test-enterprise')
+
+    def test_org_runner_url(self):
+        deployer = self._make_deployer('org')
+        self.assertEqual(deployer.runner_url, 'https://github.com/test-org')
+
+    def test_enterprise_runner_url(self):
+        deployer = self._make_deployer('enterprise')
+        self.assertEqual(
+            deployer.runner_url,
+            'https://github.com/enterprises/test-enterprise',
+        )
+
+    def test_org_registration_token_path(self):
+        """Registration token API path is correct for org scope"""
+        deployer = self._make_deployer('org')
+        expected = '/orgs/test-org/actions/runners/registration-token'
+        self.assertEqual(
+            f"{deployer.api_base}/actions/runners/registration-token",
+            expected,
+        )
+
+    def test_enterprise_registration_token_path(self):
+        """Registration token API path is correct for enterprise scope"""
+        deployer = self._make_deployer('enterprise')
+        expected = '/enterprises/test-enterprise/actions/runners/registration-token'
+        self.assertEqual(
+            f"{deployer.api_base}/actions/runners/registration-token",
+            expected,
+        )
+
+
 if __name__ == '__main__':
     unittest.main()

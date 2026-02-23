@@ -27,10 +27,22 @@
 #   - Labels: self-hosted,linux,{host_label},{type},{size},{category|generic}
 # ============================================================
 
-# GitHub organization settings
+# GitHub settings
+# Scope determines whether runners register under an org or an enterprise.
+# - scope: org         (default) Register with a single GitHub organization
+# - scope: enterprise  Register with a GitHub Enterprise and optionally manage
+#                       runner groups + org access
 github:
-  org: "your-org"  # Replace with your GitHub organization name
-  prefix: "my"     # Used in service/runner names (e.g., gha-my-linux-cpu-small-1)
+  scope: "org"         # org | enterprise (default: org)
+  org: "your-org"      # Required when scope=org: GitHub organization name
+  # enterprise: "your-enterprise"  # Required when scope=enterprise: enterprise slug
+  prefix: "my"         # Used in service/runner names (e.g., gha-my-linux-cpu-small-1)
+  # Runner group settings (enterprise scope only)
+  # runner_group:
+  #   id: 123                    # Enterprise runner group ID
+  #   allow_orgs:                # Orgs granted access to this runner group
+  #     - "org-a"
+  #     - "org-b"
 
 # Host environment
 host:

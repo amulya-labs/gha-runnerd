@@ -324,6 +324,29 @@ class HostDeployer:
         config.setdefault('sudoers', {})
         config['sudoers'].setdefault('path', '/etc/sudoers.d/gha-runner-cleanup')
 
+        # Apply defaults for github scope (backward compatible: default to org)
+        config['github'].setdefault('scope', 'org')
+
+        # Validate scope value
+        scope = config['github']['scope']
+        if scope not in ('org', 'enterprise'):
+            log(f"Invalid github.scope '{scope}'. Must be 'org' or 'enterprise'.", "error")
+            sys.exit(1)
+
+        # Validate scope-specific required fields
+        if scope == 'enterprise':
+            if not config['github'].get('enterprise'):
+                log("github.enterprise is required when scope is 'enterprise'", "error")
+                sys.exit(1)
+        else:
+            # scope == 'org'
+            if not config['github'].get('org'):
+                log("github.org is required when scope is 'org'", "error")
+                sys.exit(1)
+
+        # Apply defaults for runner_group
+        config['github'].setdefault('runner_group', {})
+
         return config
 
     def _parse_runners(self) -> List[RunnerConfig]:
@@ -345,10 +368,30 @@ class HostDeployer:
         errors = []
         warnings = []
 
-        # Check for placeholder values
-        org = self.config.get('github', {}).get('org', '')
-        if org in ['your-org', '', None]:
-            errors.append("GitHub organization not set in config.yml (still using placeholder 'your-org')")
+        # Check scope-specific settings
+        scope = self.config.get('github', {}).get('scope', 'org')
+
+        if scope == 'enterprise':
+            enterprise = self.config.get('github', {}).get('enterprise', '')
+            if enterprise in ['your-enterprise', '', None]:
+                errors.append(
+                    "GitHub enterprise slug not set in config.yml "
+                    "(required when scope is 'enterprise')"
+                )
+
+            # runner_group validation
+            runner_group = self.config.get('github', {}).get('runner_group', {})
+            if runner_group.get('allow_orgs') and not runner_group.get('id'):
+                errors.append(
+                    "runner_group.id is required when runner_group.allow_orgs is specified"
+                )
+        else:
+            org = self.config.get('github', {}).get('org', '')
+            if org in ['your-org', '', None]:
+                errors.append(
+                    "GitHub organization not set in config.yml "
+                    "(still using placeholder 'your-org')"
+                )
 
         prefix = self.config.get('github', {}).get('prefix', '')
         if not prefix or prefix == '':
@@ -428,7 +471,16 @@ class HostDeployer:
 
         if not errors and not warnings:
             log("\n✅ Configuration is valid!", "success")
-            log(f"  • Organization: {org}", "info")
+            log(f"  • Scope: {scope}", "info")
+            if scope == 'enterprise':
+                log(f"  • Enterprise: {self.config.get('github', {}).get('enterprise', '')}", "info")
+                runner_group = self.config.get('github', {}).get('runner_group', {})
+                if runner_group.get('id'):
+                    log(f"  • Runner group ID: {runner_group['id']}", "info")
+                if runner_group.get('allow_orgs'):
+                    log(f"  • Allowed orgs: {', '.join(runner_group['allow_orgs'])}", "info")
+            else:
+                log(f"  • Organization: {self.config.get('github', {}).get('org', '')}", "info")
             log(f"  • Prefix: {prefix}", "info")
             log(f"  • Runners: {len(runner_names)}", "info")
             log(f"  • Sizes: {len(self.config.get('sizes', {}))}", "info")
@@ -453,19 +505,57 @@ class HostDeployer:
         date = datetime.now(timezone.utc).strftime("%Y.%m.%d")
         return f"{date}-{self.git_sha}"
 
+    @property
+    def scope(self) -> str:
+        """Return the configured scope: 'org' or 'enterprise'"""
+        return self.config['github'].get('scope', 'org')
+
+    @property
+    def api_base(self) -> str:
+        """Return the scope-appropriate GitHub API base path for runner operations.
+
+        For org scope:        /orgs/{org}
+        For enterprise scope: /enterprises/{enterprise}
+        """
+        if self.scope == 'enterprise':
+            enterprise = self.config['github']['enterprise']
+            return f"/enterprises/{enterprise}"
+        org = self.config['github']['org']
+        return f"/orgs/{org}"
+
+    @property
+    def runner_url(self) -> str:
+        """Return the URL passed to config.sh --url during runner registration.
+
+        For org scope:        https://github.com/{org}
+        For enterprise scope: https://github.com/enterprises/{enterprise}
+        """
+        if self.scope == 'enterprise':
+            enterprise = self.config['github']['enterprise']
+            return f"https://github.com/enterprises/{enterprise}"
+        org = self.config['github']['org']
+        return f"https://github.com/{org}"
+
+    def _gh_prefix(self) -> List[str]:
+        """Return command prefix to run gh as the original (non-root) user."""
+        sudo_user = os.environ.get('SUDO_USER')
+        if sudo_user and os.geteuid() == 0:
+            return ["sudo", "-u", sudo_user]
+        return []
+
     def fetch_github_token(self):
         """Fetch a fresh registration token from GitHub"""
-        # Run gh as the original user (not root) to access their gh auth
-        sudo_user = os.environ.get('SUDO_USER')
-        gh_prefix = []
-        if sudo_user and os.geteuid() == 0:
-            gh_prefix = ["sudo", "-u", sudo_user]
-
-        org = self.config['github']['org']
+        gh_prefix = self._gh_prefix()
+        api_path = f"{self.api_base}/actions/runners/registration-token"
+        scope_label = (
+            f"enterprise: {self.config['github']['enterprise']}"
+            if self.scope == 'enterprise'
+            else f"org: {self.config['github']['org']}"
+        )
 
         try:
-            log(f"Fetching registration token for org: {org}...", "info")
-            cmd = gh_prefix + ["gh", "api", "-X", "POST", f"/orgs/{org}/actions/runners/registration-token", "--jq", ".token"]
+            log(f"Fetching registration token for {scope_label}...", "info")
+            cmd = gh_prefix + ["gh", "api", "-X", "POST", api_path, "--jq", ".token"]
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             token = result.stdout.strip()
 
@@ -476,13 +566,17 @@ class HostDeployer:
             return token
 
         except subprocess.CalledProcessError as e:
-            log(f"Failed to fetch registration token", "error")
+            log("Failed to fetch registration token", "error")
             if e.stderr:
                 log(f"Error: {e.stderr.strip()}", "error")
             log("Possible causes:", "error")
             log("  • Not authenticated with gh CLI (run 'gh auth login')", "error")
-            log("  • Insufficient permissions for the organization", "error")
-            log("  • Organization name incorrect in config.yml", "error")
+            if self.scope == 'enterprise':
+                log("  • Insufficient permissions for the enterprise", "error")
+                log("  • Enterprise slug incorrect in config.yml", "error")
+            else:
+                log("  • Insufficient permissions for the organization", "error")
+                log("  • Organization name incorrect in config.yml", "error")
             return None
         except Exception as e:
             log(f"Unexpected error fetching token: {e}", "error")
@@ -673,10 +767,9 @@ class HostDeployer:
         log(f"Registering {runner.registered_name}...", "info")
 
         runner_path = Path(runner.runner_path)
-        org = self.config['github']['org']
-        runner_url = f"https://github.com/{org}"
+        reg_url = self.runner_url
 
-        log_debug(f"Runner URL: {runner_url}")
+        log_debug(f"Runner URL: {reg_url}")
         log_debug(f"Runner name: {runner.registered_name}")
         log_debug(f"Labels: {runner.labels}")
 
@@ -704,13 +797,18 @@ class HostDeployer:
             # Run config.sh
             config_cmd = [
                 str(runner_path / "config.sh"),
-                "--url", runner_url,
+                "--url", reg_url,
                 "--token", "***TOKEN***" if DRY_RUN else token,
                 "--name", runner.registered_name,
                 "--labels", runner.labels,
                 "--unattended",
                 "--replace"
             ]
+
+            # Add runner group if configured (enterprise scope)
+            runner_group_id = self.config['github'].get('runner_group', {}).get('id')
+            if runner_group_id:
+                config_cmd.extend(["--runnergroup", str(runner_group_id)])
 
             # Run as the runner user
             uid = self.config['host']['docker_user_uid']
@@ -1038,23 +1136,18 @@ WantedBy=multi-user.target
 
         log("Syncing labels via GitHub API...", "header")
 
-        org = self.config['github']['org']
-
-        # Run gh as the original user (not root) to access their gh auth
-        sudo_user = os.environ.get('SUDO_USER')
-        gh_prefix = []
-        if sudo_user and os.geteuid() == 0:
-            gh_prefix = ["sudo", "-u", sudo_user]
+        gh_prefix = self._gh_prefix()
+        api_runners = f"{self.api_base}/actions/runners"
 
         for runner in self.runners:
             try:
-                cmd = gh_prefix + ["gh", "api", f"/orgs/{org}/actions/runners",
+                cmd = gh_prefix + ["gh", "api", api_runners,
                      "--jq", f'.runners[] | select(.name=="{runner.registered_name}") | .id']
                 result = subprocess.run(cmd, capture_output=True, text=True, check=True)
                 runner_id = result.stdout.strip()
 
                 if not runner_id:
-                    log(f"Runner {runner.registered_name} not found in org, skipping", "warning")
+                    log(f"Runner {runner.registered_name} not found, skipping", "warning")
                     continue
 
                 # Update labels (filter out read-only labels that GitHub assigns automatically)
@@ -1062,7 +1155,8 @@ WantedBy=multi-user.target
                 labels = [l for l in runner.labels.split(',') if l not in readonly_labels]
                 labels_json = json.dumps({"labels": labels})
 
-                cmd = gh_prefix + ["gh", "api", "-X", "PUT", f"/orgs/{org}/actions/runners/{runner_id}/labels", "--input", "-"]
+                cmd = gh_prefix + ["gh", "api", "-X", "PUT",
+                       f"{api_runners}/{runner_id}/labels", "--input", "-"]
                 proc = subprocess.Popen(
                     cmd,
                     stdin=subprocess.PIPE,
@@ -1080,10 +1174,88 @@ WantedBy=multi-user.target
             except Exception as e:
                 log(f"Failed to sync labels for {runner.registered_name}: {e}", "warning")
 
+    def sync_runner_group_org_access(self):
+        """Set organization access for an enterprise runner group.
+
+        When scope=enterprise and runner_group.id + runner_group.allow_orgs
+        are configured, this uses the GitHub API to grant the listed orgs
+        access to the runner group.
+        """
+        if self.scope != 'enterprise':
+            return
+
+        runner_group = self.config['github'].get('runner_group', {})
+        group_id = runner_group.get('id')
+        allow_orgs = runner_group.get('allow_orgs', [])
+
+        if not group_id or not allow_orgs:
+            log_debug("No runner_group org access to configure")
+            return
+
+        enterprise = self.config['github']['enterprise']
+        gh_prefix = self._gh_prefix()
+
+        log(f"Configuring org access for enterprise runner group {group_id}...", "header")
+
+        try:
+            # First, look up org IDs from slugs
+            org_ids = []
+            for org_slug in allow_orgs:
+                log(f"  Looking up org ID for '{org_slug}'...", "info")
+                result = subprocess.run(
+                    gh_prefix + ["gh", "api", f"/orgs/{org_slug}", "--jq", ".id"],
+                    capture_output=True, text=True, check=True
+                )
+                org_id = result.stdout.strip()
+                if org_id:
+                    org_ids.append(int(org_id))
+                    log_debug(f"  Org '{org_slug}' -> ID {org_id}")
+                else:
+                    log(f"  Could not resolve org '{org_slug}' to an ID, skipping", "warning")
+
+            if not org_ids:
+                log("No valid org IDs found, skipping runner group org access", "warning")
+                return
+
+            # Set org access on the runner group
+            api_path = (
+                f"/enterprises/{enterprise}/actions/runner-groups"
+                f"/{group_id}/organizations"
+            )
+            payload = json.dumps({"selected_organization_ids": org_ids})
+
+            log(f"  Setting org access: {allow_orgs} (IDs: {org_ids})", "info")
+            proc = subprocess.Popen(
+                gh_prefix + ["gh", "api", "-X", "PUT", api_path, "--input", "-"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            stdout, stderr = proc.communicate(input=payload)
+
+            if proc.returncode != 0:
+                raise Exception(f"gh api failed: {stderr}")
+
+            log(f"Runner group {group_id} org access configured", "success")
+
+        except Exception as e:
+            log(f"Failed to configure runner group org access: {e}", "warning")
+            log("  You may need to manually configure org access at:", "warning")
+            log(
+                f"  https://github.com/enterprises/{enterprise}"
+                f"/settings/actions/runner-groups/{group_id}",
+                "warning",
+            )
+
     def print_summary(self):
         """Print deployment summary"""
-        org = self.config['github']['org']
-        settings_url = f"https://github.com/organizations/{org}/settings/actions/runners"
+        if self.scope == 'enterprise':
+            enterprise = self.config['github']['enterprise']
+            settings_url = f"https://github.com/enterprises/{enterprise}/settings/actions/runners"
+        else:
+            org = self.config['github']['org']
+            settings_url = f"https://github.com/organizations/{org}/settings/actions/runners"
         removed = getattr(self, '_removed_runners', [])
 
         log("\n" + "="*60, "header")
@@ -1134,7 +1306,6 @@ WantedBy=multi-user.target
         to the GitHub API if the runner directory or binary is missing.
         """
         token = os.environ.get("REGISTER_GITHUB_RUNNER_TOKEN")
-        org = self.config['github']['org']
         uid = self.config['host']['docker_user_uid']
         registered_name = f"{self.config['github']['prefix']}-linux-{runner_name}"
         config_script = runner_path / "config.sh"
@@ -1154,19 +1325,16 @@ WantedBy=multi-user.target
                 log(f"Deregistered {registered_name} from GitHub", "success")
                 return True
             except Exception:
-                log(f"config.sh remove failed, trying GitHub API fallback...", "warning")
+                log("config.sh remove failed, trying GitHub API fallback...", "warning")
 
         # Fallback: remove via GitHub API
         log(f"Deregistering {registered_name} from GitHub via API...", "info")
         try:
-            # Look up runner ID by name
-            sudo_user = os.environ.get('SUDO_USER')
-            gh_prefix = []
-            if sudo_user and os.geteuid() == 0:
-                gh_prefix = ["sudo", "-u", sudo_user]
+            gh_prefix = self._gh_prefix()
+            api_runners = f"{self.api_base}/actions/runners"
 
             result = run_cmd(
-                gh_prefix + ["gh", "api", f"/orgs/{org}/actions/runners",
+                gh_prefix + ["gh", "api", api_runners,
                              "--paginate", "--jq",
                              f'.runners[] | select(.name == "{registered_name}") | .id'],
                 capture=True,
@@ -1177,7 +1345,7 @@ WantedBy=multi-user.target
             if runner_id:
                 run_cmd(
                     gh_prefix + ["gh", "api", "-X", "DELETE",
-                                 f"/orgs/{org}/actions/runners/{runner_id}"],
+                                 f"{api_runners}/{runner_id}"],
                     check=False
                 )
                 log(f"Deregistered {registered_name} (ID: {runner_id}) from GitHub", "success")
@@ -1188,8 +1356,21 @@ WantedBy=multi-user.target
 
         except Exception as e:
             log(f"Failed to deregister {registered_name} from GitHub: {e}", "warning")
-            log(f"  You may need to manually remove it from:", "warning")
-            log(f"  https://github.com/organizations/{org}/settings/actions/runners", "warning")
+            log("  You may need to manually remove it from:", "warning")
+            if self.scope == 'enterprise':
+                enterprise = self.config['github']['enterprise']
+                log(
+                    f"  https://github.com/enterprises/{enterprise}"
+                    f"/settings/actions/runners",
+                    "warning",
+                )
+            else:
+                org = self.config['github']['org']
+                log(
+                    f"  https://github.com/organizations/{org}"
+                    f"/settings/actions/runners",
+                    "warning",
+                )
             return False
 
     def cleanup_removed_runners(self):
@@ -1614,6 +1795,7 @@ WantedBy=multi-user.target
             self.create_systemd_service(runner)
 
         self.sync_labels_via_api()
+        self.sync_runner_group_org_access()
         self.print_summary()
 
 
