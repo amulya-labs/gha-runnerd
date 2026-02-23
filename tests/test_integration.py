@@ -9,6 +9,8 @@ These tests validate:
 """
 
 import unittest
+from unittest.mock import patch, MagicMock
+import subprocess
 import tempfile
 import os
 import sys
@@ -1046,6 +1048,185 @@ class TestEnterpriseApiPaths(unittest.TestCase):
             f"{deployer.api_base}/actions/runners/registration-token",
             expected,
         )
+
+
+class TestDeregistrationFallback(unittest.TestCase):
+    """Test that config.sh failure falls through to API-based deregistration"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "test-config.yml"
+        cfg = {
+            'github': {'org': 'test-org', 'prefix': 'test', 'scope': 'org'},
+            'host': {
+                'runner_base': '/srv/gha',
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
+                'label': 'test-host',
+            },
+            'cache': {'base_dir': '/srv/gha-cache', 'permissions': '755'},
+            'runners': ['cpu-small-1'],
+            'sizes': {'small': {'cpus': 2.0, 'mem_limit': '4g'}},
+            'runner': {'version': '2.321.0', 'arch': 'linux-x64'},
+        }
+        with open(self.config_file, 'w') as f:
+            yaml.dump(cfg, f)
+        self.deployer = HostDeployer(config_path=str(self.config_file))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    @patch.dict(os.environ, {"REGISTER_GITHUB_RUNNER_TOKEN": "fake-token"})
+    @patch.object(deploy_host, 'run_cmd')
+    def test_deregister_falls_through_on_config_sh_failure(self, mock_run_cmd):
+        """config.sh returning non-zero should fall through to API fallback"""
+        runner_path = Path("/srv/gha/test-linux-cpu-small-1")
+
+        # First call: config.sh remove → returns non-zero
+        config_fail = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="error"
+        )
+        # Second call: gh api (list runners) → returns runner id
+        api_list = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="12345\n", stderr=""
+        )
+        # Third call: gh api DELETE → success
+        api_delete = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        mock_run_cmd.side_effect = [config_fail, api_list, api_delete]
+
+        with patch.object(Path, 'exists', return_value=True):
+            result = self.deployer._deregister_runner_from_github("cpu-small-1", runner_path)
+
+        self.assertTrue(result)
+        # Should have called run_cmd 3 times: config.sh, API list, API delete
+        self.assertEqual(mock_run_cmd.call_count, 3)
+        # Verify the API fallback was reached (second call has 'gh' in args)
+        second_call_args = mock_run_cmd.call_args_list[1][0][0]
+        self.assertIn("gh", second_call_args)
+
+
+class TestBusyRunnerProtection(unittest.TestCase):
+    """Test that busy runners are not killed during removal"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "test-config.yml"
+        cfg = {
+            'github': {'org': 'test-org', 'prefix': 'test', 'scope': 'org'},
+            'host': {
+                'runner_base': '/srv/gha',
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
+                'label': 'test-host',
+            },
+            'cache': {'base_dir': '/srv/gha-cache', 'permissions': '755'},
+            'runners': ['cpu-small-1'],
+            'sizes': {'small': {'cpus': 2.0, 'mem_limit': '4g'}},
+            'runner': {'version': '2.321.0', 'arch': 'linux-x64'},
+        }
+        with open(self.config_file, 'w') as f:
+            yaml.dump(cfg, f)
+        self.deployer = HostDeployer(config_path=str(self.config_file))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    @patch.object(deploy_host, 'run_cmd')
+    def test_busy_runner_skipped_during_cleanup(self, mock_run_cmd):
+        """Busy runners should be skipped during cleanup_removed_runners"""
+        # systemctl list-units returns an old runner not in config
+        list_result = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="gha-test-linux-old-runner-1.service loaded active running\n",
+            stderr=""
+        )
+        # _is_runner_busy → gh api returns "true"
+        busy_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="true\n", stderr=""
+        )
+        mock_run_cmd.side_effect = [list_result, busy_result]
+
+        self.deployer.cleanup_removed_runners()
+
+        # Only 2 calls: systemctl list + busy check. No stop/disable/deregister.
+        self.assertEqual(mock_run_cmd.call_count, 2)
+        self.assertEqual(self.deployer._removed_runners, [])
+
+    @patch.object(deploy_host, 'run_cmd')
+    def test_idle_runner_removed_during_cleanup(self, mock_run_cmd):
+        """Idle runners should be removed normally during cleanup"""
+        # systemctl list-units returns an old runner not in config
+        list_result = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="gha-test-linux-old-runner-1.service loaded active running\n",
+            stderr=""
+        )
+        # _is_runner_busy → gh api returns "false"
+        idle_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="false\n", stderr=""
+        )
+        # Remaining calls for the removal process (stop, disable, deregister, etc.)
+        generic_ok = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        mock_run_cmd.side_effect = [list_result, idle_result] + [generic_ok] * 20
+
+        with patch.object(Path, 'exists', return_value=False):
+            self.deployer.cleanup_removed_runners()
+
+        # Should have proceeded past the busy check to stop/disable/deregister
+        self.assertGreater(mock_run_cmd.call_count, 2)
+        self.assertEqual(self.deployer._removed_runners, ["test-linux-old-runner-1"])
+
+    @patch.object(deploy_host, 'run_cmd')
+    def test_force_remove_bypasses_busy_check(self, mock_run_cmd):
+        """--force should skip the busy check and remove anyway"""
+        # systemctl list-units → service exists
+        list_result = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="gha-test-linux-cpu-small-1.service loaded active running\n",
+            stderr=""
+        )
+        generic_ok = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        mock_run_cmd.side_effect = [list_result] + [generic_ok] * 20
+
+        with patch.object(Path, 'exists', return_value=False):
+            result = self.deployer.remove_runner("cpu-small-1", force=True)
+
+        self.assertTrue(result)
+        # Verify no busy-check call was made (would contain '--jq' with '.busy')
+        for call in mock_run_cmd.call_args_list:
+            joined = " ".join(str(a) for a in call[0][0])
+            self.assertNotIn(".busy", joined)
+
+    @patch.object(deploy_host, 'run_cmd')
+    def test_busy_runner_blocked_without_force(self, mock_run_cmd):
+        """remove_runner should refuse to remove a busy runner without --force"""
+        # systemctl list-units → service exists
+        list_result = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="gha-test-linux-cpu-small-1.service loaded active running\n",
+            stderr=""
+        )
+        # _is_runner_busy → "true"
+        busy_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="true\n", stderr=""
+        )
+        mock_run_cmd.side_effect = [list_result, busy_result]
+
+        result = self.deployer.remove_runner("cpu-small-1", force=False)
+
+        self.assertFalse(result)
+        # Only 2 calls: list-units + busy check. No stop/disable.
+        self.assertEqual(mock_run_cmd.call_count, 2)
 
 
 if __name__ == '__main__':

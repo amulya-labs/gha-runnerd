@@ -1301,6 +1301,35 @@ WantedBy=multi-user.target
 
         log("\n" + "="*60 + "\n", "header")
 
+    def _is_runner_busy(self, runner_name: str) -> Optional[bool]:
+        """Check whether a runner is currently executing a job.
+
+        Returns True if busy, False if idle, None if the runner was not found
+        on GitHub (already removed or never registered).
+        """
+        prefix = self.config['github']['prefix']
+        registered_name = f"{prefix}-linux-{runner_name}"
+        gh_prefix = self._gh_prefix()
+        api_runners = f"{self.api_base}/actions/runners"
+
+        try:
+            result = run_cmd(
+                gh_prefix + ["gh", "api", api_runners,
+                             "--paginate", "--jq",
+                             f'.runners[] | select(.name == "{registered_name}") | .busy'],
+                capture=True,
+                check=False
+            )
+            value = result.stdout.strip().lower() if result else ""
+            if value == "true":
+                return True
+            elif value == "false":
+                return False
+            else:
+                return None
+        except Exception:
+            return None
+
     def _deregister_runner_from_github(self, runner_name, runner_path):
         """Deregister a runner from GitHub before local removal.
 
@@ -1319,13 +1348,16 @@ WantedBy=multi-user.target
                 str(config_script), "remove", "--token", token
             ]
             try:
-                run_cmd(
+                result = run_cmd(
                     ["sudo", "-u", f"#{uid}", "bash", "-c",
                      f"cd {shlex.quote(str(runner_path))} && {' '.join(shlex.quote(arg) for arg in remove_cmd)}"],
                     check=False
                 )
-                log(f"Deregistered {registered_name} from GitHub", "success")
-                return True
+                if result and result.returncode == 0:
+                    log(f"Deregistered {registered_name} from GitHub", "success")
+                    return True
+                else:
+                    log("config.sh remove failed, trying GitHub API fallback...", "warning")
             except Exception:
                 log("config.sh remove failed, trying GitHub API fallback...", "warning")
 
@@ -1409,6 +1441,13 @@ WantedBy=multi-user.target
             # If this runner is no longer in config, remove it
             if runner_name not in configured_names:
                 registered_name = f"{prefix}-linux-{runner_name}"
+
+                # Skip busy runners during cleanup to avoid killing in-progress jobs
+                busy = self._is_runner_busy(runner_name)
+                if busy:
+                    log(f"\n>>> Skipping runner: {registered_name} (busy, executing a job)", "warning")
+                    continue
+
                 log(f"\n>>> Removing runner: {registered_name} (not in config)", "warning")
                 service_name = f"{service_pattern}{runner_name}.service"
                 runner_path = Path(f"{self.config['host']['runner_base']}/{prefix}-linux-{runner_name}")
@@ -1550,7 +1589,7 @@ WantedBy=multi-user.target
         
         log(f"\nTotal runners: {len(runners_found)}", "info")
 
-    def remove_runner(self, runner_name: str):
+    def remove_runner(self, runner_name: str, force: bool = False):
         """Remove a specific runner by name"""
         log(f"Removing runner: {runner_name}\n", "warning")
 
@@ -1563,7 +1602,7 @@ WantedBy=multi-user.target
         prefix = self.config['github']['prefix']
         service_name = f"gha-{prefix}-linux-{runner_name}.service"
         runner_path = Path(f"{self.config['host']['runner_base']}/{prefix}-linux-{runner_name}")
-        
+
         # Check if service exists
         check_result = run_cmd(
             ["systemctl", "list-units", "--all", "--no-legend", service_name],
@@ -1571,11 +1610,20 @@ WantedBy=multi-user.target
             capture=True,
             check=False
         )
-        
+
         if not check_result.stdout.strip():
             log(f"Runner '{runner_name}' not found", "error")
             return False
-        
+
+        # Check if runner is busy (skip with --force)
+        if not force:
+            busy = self._is_runner_busy(runner_name)
+            if busy:
+                registered_name = f"{prefix}-linux-{runner_name}"
+                log(f"Runner '{registered_name}' is currently executing a job", "error")
+                log("Use --force to remove it anyway (will kill the running job)", "info")
+                return False
+
         # 1. Stop and disable service
         log(f"Stopping service {service_name}...", "info")
         run_cmd(
@@ -1823,6 +1871,9 @@ Examples:
   # Remove a specific runner
   ./deploy-host.py --remove cpu-small-1
 
+  # Force-remove a busy runner (kills any running job)
+  ./deploy-host.py --remove cpu-small-1 --force
+
   # Upgrade all runner binaries
   ./deploy-host.py --upgrade
 
@@ -1862,6 +1913,11 @@ Note: The script will prompt for sudo password when needed for system operations
         help='Remove a specific runner (e.g., cpu-small-1)'
     )
     parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Force removal even if the runner is busy (use with --remove)'
+    )
+    parser.add_argument(
         '--upgrade',
         action='store_true',
         help='Upgrade runner binaries for all deployed runners'
@@ -1899,7 +1955,7 @@ Note: The script will prompt for sudo password when needed for system operations
 
         # Handle --remove command
         if args.remove:
-            if deployer.remove_runner(args.remove):
+            if deployer.remove_runner(args.remove, force=args.force):
                 sys.exit(0)
             else:
                 sys.exit(1)
