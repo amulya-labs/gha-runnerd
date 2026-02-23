@@ -1023,10 +1023,14 @@ class HostDeployer:
                 rp = shlex.quote(str(runner_path))
                 shell_cmd = (
                     f"cd {rp}"
-                    f" && echo 'pwd:' && pwd"
-                    f" && ls -la .runner 2>&1 || true"
+                    f" && echo 'pwd:' && pwd && echo 'pwd -P:' && pwd -P"
+                    f" && echo '--- all .runner files under /srv/gha ---'"
+                    f" && find /srv/gha -maxdepth 3 -name .runner -ls 2>&1 || true"
+                    f" && echo '--- config.sh real path ---'"
+                    f" && readlink -f {rp}/config.sh 2>&1 || true"
                     f" && rm -fv .runner .credentials .credentials_rsaparams"
-                    f" && (test -f .runner && echo 'ERROR: .runner still exists after rm' || echo '.runner removed ok')"
+                    f" && echo '--- after rm: all .runner files ---'"
+                    f" && find /srv/gha -maxdepth 3 -name .runner -ls 2>&1 || true"
                     f" && {config_cmd_str}"
                 )
                 result = run_cmd(
