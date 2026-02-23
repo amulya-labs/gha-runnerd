@@ -80,7 +80,7 @@
             enabled: true
             state: started
 
-    - name: Install GitHub CLI
+    - name: Install GitHub CLI (Debian/Ubuntu)
       ansible.builtin.shell: |
         if ! command -v gh &>/dev/null; then
           curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -92,6 +92,17 @@
       args:
         creates: /usr/bin/gh
       when: ansible_os_family == "Debian"
+
+    - name: Install GitHub CLI (RHEL/Fedora)
+      ansible.builtin.shell: |
+        if ! command -v gh &>/dev/null; then
+          dnf install -y 'dnf-command(config-manager)' || true
+          dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
+          dnf install -y gh
+        fi
+      args:
+        creates: /usr/bin/gh
+      when: ansible_os_family == "RedHat"
 
     - name: Create CI runner group
       ansible.builtin.group:

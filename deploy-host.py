@@ -1934,8 +1934,8 @@ WantedBy=multi-user.target
         """Get list of deployed runners from systemd, optionally filtered by pool pattern.
 
         Returns a list of dicts with keys: name, service, status, path, exists.
-        If pool is given, only runners whose name contains the pattern (or matches
-        as a glob) are returned.
+        If pool is given, only runners whose name contains the given substring
+        (matched using a pattern of ``*{pool}*``) are returned.
         """
         prefix = self.config['github']['prefix']
         service_pattern = f"gha-{prefix}-linux-"
@@ -2171,7 +2171,13 @@ WantedBy=multi-user.target
         lines.append("# TYPE gha_runner_busy gauge")
         for r in runners:
             busy = self._is_runner_busy(r['name'])
-            val = 1 if busy else 0
+            if busy is None:
+                # Runner state unknown (e.g., not found in GitHub API); -1 signals unknown
+                val = -1
+            elif busy:
+                val = 1
+            else:
+                val = 0
             lines.append(f'gha_runner_busy{{name="{r["name"]}"}} {val}')
 
         # Total configured runners
