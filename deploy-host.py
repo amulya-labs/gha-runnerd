@@ -2196,15 +2196,29 @@ WantedBy=multi-user.target
 
         # Atomic write: write to temp file in same directory, then rename
         output_dir = os.path.dirname(output_path) or "."
-        os.makedirs(output_dir, exist_ok=True)
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except PermissionError:
+            log(f"Cannot create metrics directory: {output_dir}", "error")
+            log("Either run with sudo, or use --metrics-path to write somewhere writable:", "info")
+            log(f"  ./deploy-host.py --metrics --metrics-path /tmp/gha-runners.prom", "info")
+            sys.exit(1)
         fd, tmp_path = tempfile.mkstemp(dir=output_dir, suffix=".prom.tmp")
         try:
             with os.fdopen(fd, 'w') as f:
                 f.write(content)
             os.rename(tmp_path, output_path)
             log(f"Metrics written to {output_path}", "success")
+        except PermissionError:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            log(f"Cannot write metrics to: {output_path}", "error")
+            log("Either run with sudo, or use --metrics-path to write somewhere writable:", "info")
+            log(f"  ./deploy-host.py --metrics --metrics-path /tmp/gha-runners.prom", "info")
+            sys.exit(1)
         except Exception:
-            # Clean up temp file on failure
             try:
                 os.unlink(tmp_path)
             except OSError:
