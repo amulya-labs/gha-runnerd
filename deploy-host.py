@@ -718,21 +718,19 @@ class HostDeployer:
 
         # If budget limits are active, require all sizes to have concrete values
         sizes_config = self.config.get('sizes', {})
-        if check_cpu_budget:
+        if check_cpu_budget or check_mem_budget:
             for size_name, size_cfg in sizes_config.items():
-                if isinstance(size_cfg, dict) and size_cfg.get('cpus') is None:
-                    errors.append(
-                        f"Size '{size_name}' must define 'cpus' when "
-                        f"host.max_cpus is set"
-                    )
-
-        if check_mem_budget:
-            for size_name, size_cfg in sizes_config.items():
-                if isinstance(size_cfg, dict) and size_cfg.get('mem_limit') is None:
-                    errors.append(
-                        f"Size '{size_name}' must define 'mem_limit' when "
-                        f"host.max_memory is set"
-                    )
+                if isinstance(size_cfg, dict):
+                    if check_cpu_budget and size_cfg.get('cpus') is None:
+                        errors.append(
+                            f"Size '{size_name}' must define 'cpus' when "
+                            f"host.max_cpus is set"
+                        )
+                    if check_mem_budget and size_cfg.get('mem_limit') is None:
+                        errors.append(
+                            f"Size '{size_name}' must define 'mem_limit' when "
+                            f"host.max_memory is set"
+                        )
 
         # Sum runner resources and check against budget (only if no errors so far
         # for the relevant limit, to avoid cascading failures)
