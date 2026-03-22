@@ -1069,6 +1069,8 @@ class HostDeployer:
         log(f"Downloading runner v{version}...", "info")
         run_cmd(
             ["curl", "-fsSL", "-o", str(tarball_path), tarball_url],
+            sudo=True,
+            sudo_reason=f"downloading runner binary to {runner_path}",
             dry_run_msg=f"Download runner v{version} from GitHub"
         )
 
@@ -1076,14 +1078,18 @@ class HostDeployer:
         log("Extracting runner...", "info")
         run_cmd(
             ["tar", "xzf", str(tarball_path), "-C", str(runner_path)],
+            sudo=True,
+            sudo_reason=f"extracting runner binary to {runner_path}",
             dry_run_msg=f"Extract runner to {runner_path}"
         )
 
         # Remove tarball
-        if not DRY_RUN:
-            tarball_path.unlink()
-        else:
-            log_dry_run(f"Remove tarball {tarball_path}")
+        run_cmd(
+            ["rm", "-f", str(tarball_path)],
+            sudo=True,
+            sudo_reason=f"removing runner tarball",
+            dry_run_msg=f"Remove tarball {tarball_path}"
+        )
 
         # Fix ownership
         uid = self.config['host']['docker_user_uid']
