@@ -1875,10 +1875,14 @@ class TestUnconfigureRunnerIdempotency(unittest.TestCase):
         self.deployer._unconfigure_runner(runner, "fake-token")
 
         calls = mock_run_cmd.call_args_list
-        # First call should be systemctl stop
+        # First call should be systemctl is-active check
         first_cmd = calls[0][0][0]
         self.assertIn("systemctl", first_cmd)
-        self.assertIn("stop", first_cmd)
+        self.assertIn("is-active", first_cmd)
+        # Second call should be systemctl stop (since is-active returned 0)
+        second_cmd = calls[1][0][0]
+        self.assertIn("systemctl", second_cmd)
+        self.assertIn("stop", second_cmd)
 
     @patch.object(deploy_host, 'run_cmd')
     def test_unconfigure_survives_service_stop_failure(self, mock_run_cmd):
@@ -1907,8 +1911,8 @@ class TestUnconfigureRunnerIdempotency(unittest.TestCase):
 
         def side_effect(cmd, **kwargs):
             call_count[0] += 1
-            if call_count[0] == 1:
-                # systemctl stop: ok
+            if call_count[0] <= 2:
+                # systemctl is-active + stop: ok
                 return subprocess.CompletedProcess(args=cmd, returncode=0)
             # config.sh remove: unexpected error
             raise OSError("no such file")

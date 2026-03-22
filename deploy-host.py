@@ -1248,12 +1248,17 @@ class HostDeployer:
 
         # Stop the service first so the running process can't interfere
         service_name = f"{runner.service_name}.service"
-        run_cmd(
-            ["systemctl", "stop", service_name],
-            sudo=True,
-            sudo_reason=f"stopping {service_name} before reconfiguration",
-            check=False,
+        result = run_cmd(
+            ["systemctl", "is-active", "--quiet", service_name],
+            check=False, capture=True,
         )
+        if result and result.returncode == 0:
+            run_cmd(
+                ["systemctl", "stop", service_name],
+                sudo=True,
+                sudo_reason=f"stopping {service_name} before reconfiguration",
+                check=False,
+            )
 
         # Try to cleanly deregister via config.sh remove (best-effort).
         # This tells GitHub to remove the runner. If it fails (e.g. 404
