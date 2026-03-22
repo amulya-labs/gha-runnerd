@@ -11,6 +11,8 @@ host:
   docker_socket: "/var/run/docker.sock"
   docker_user_uid: 1003
   docker_user_gid: 1003
+  # max_cpus: 64       # Total CPU budget for all runners (-1 to disable)
+  # max_memory: "128g" # Total memory budget for all runners (-1 to disable)
 
 cache:
   base_dir: "/srv/gha-cache"

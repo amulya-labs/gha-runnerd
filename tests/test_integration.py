@@ -1875,10 +1875,14 @@ class TestUnconfigureRunnerIdempotency(unittest.TestCase):
         self.deployer._unconfigure_runner(runner, "fake-token")
 
         calls = mock_run_cmd.call_args_list
-        # First call should be systemctl stop
+        # First call should be systemctl is-active check
         first_cmd = calls[0][0][0]
         self.assertIn("systemctl", first_cmd)
-        self.assertIn("stop", first_cmd)
+        self.assertIn("is-active", first_cmd)
+        # Second call should be systemctl stop (since is-active returned 0)
+        second_cmd = calls[1][0][0]
+        self.assertIn("systemctl", second_cmd)
+        self.assertIn("stop", second_cmd)
 
     @patch.object(deploy_host, 'run_cmd')
     def test_unconfigure_survives_service_stop_failure(self, mock_run_cmd):
@@ -1907,8 +1911,8 @@ class TestUnconfigureRunnerIdempotency(unittest.TestCase):
 
         def side_effect(cmd, **kwargs):
             call_count[0] += 1
-            if call_count[0] == 1:
-                # systemctl stop: ok
+            if call_count[0] <= 2:
+                # systemctl is-active + stop: ok
                 return subprocess.CompletedProcess(args=cmd, returncode=0)
             # config.sh remove: unexpected error
             raise OSError("no such file")
@@ -2443,6 +2447,187 @@ class TestDiskInfo(unittest.TestCase):
         self.assertIn('KB', HostDeployer._format_bytes(1536))
         self.assertIn('MB', HostDeployer._format_bytes(1048576))
         self.assertIn('GB', HostDeployer._format_bytes(1073741824))
+
+
+class TestMemoryParsing(unittest.TestCase):
+    """Tests for parse_systemd_memory_to_bytes and format_bytes_human"""
+
+    def test_parse_gigabytes_lower(self):
+        self.assertEqual(deploy_host.parse_systemd_memory_to_bytes('4g'), 4 * 1024**3)
+
+    def test_parse_gigabytes_upper(self):
+        self.assertEqual(deploy_host.parse_systemd_memory_to_bytes('4G'), 4 * 1024**3)
+
+    def test_parse_megabytes(self):
+        self.assertEqual(deploy_host.parse_systemd_memory_to_bytes('512M'), 512 * 1024**2)
+
+    def test_parse_kilobytes(self):
+        self.assertEqual(deploy_host.parse_systemd_memory_to_bytes('1024K'), 1024 * 1024)
+
+    def test_parse_terabytes(self):
+        self.assertEqual(deploy_host.parse_systemd_memory_to_bytes('1T'), 1024**4)
+
+    def test_parse_invalid_raises(self):
+        with self.assertRaises(ValueError):
+            deploy_host.parse_systemd_memory_to_bytes('bad')
+
+    def test_format_gigabytes(self):
+        self.assertEqual(deploy_host.format_bytes_human(64 * 1024**3), '64G')
+
+    def test_format_megabytes(self):
+        self.assertEqual(deploy_host.format_bytes_human(512 * 1024**2), '512M')
+
+    def test_format_kilobytes(self):
+        self.assertEqual(deploy_host.format_bytes_human(4 * 1024), '4K')
+
+    def test_format_bytes(self):
+        self.assertEqual(deploy_host.format_bytes_human(500), '500B')
+
+    def test_roundtrip(self):
+        """parse then format should return equivalent value"""
+        for val in ['2g', '512M', '1T', '1024K']:
+            num_bytes = deploy_host.parse_systemd_memory_to_bytes(val)
+            formatted = deploy_host.format_bytes_human(num_bytes)
+            self.assertEqual(
+                deploy_host.parse_systemd_memory_to_bytes(formatted), num_bytes
+            )
+
+
+class TestResourceBudgetValidation(unittest.TestCase):
+    """Tests for host.max_cpus and host.max_memory budget enforcement"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "test-config.yml"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _base_config(self):
+        return {
+            'github': {'org': 'test-org', 'prefix': 'test'},
+            'host': {
+                'runner_base': '/srv/gha',
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
+                'label': 'test-host',
+            },
+            'cache': {'base_dir': '/srv/gha-cache', 'permissions': '755'},
+            'runners': ['cpu-small-1', 'cpu-small-2', 'cpu-medium-1'],
+            'sizes': {
+                'small': {'cpus': 2.0, 'mem_limit': '4g', 'pids_limit': 2048},
+                'medium': {'cpus': 6.0, 'mem_limit': '16g', 'pids_limit': 4096},
+            },
+            'runner': {'version': '2.321.0', 'arch': 'linux-x64'},
+        }
+
+    def _validate(self, config):
+        with open(self.config_file, 'w') as f:
+            yaml.dump(config, f)
+        deployer = HostDeployer(config_path=str(self.config_file))
+        return deployer.validate_config()
+
+    def test_within_cpu_budget(self):
+        """Config within CPU budget should pass"""
+        config = self._base_config()
+        # 2 + 2 + 6 = 10 total CPUs
+        config['host']['max_cpus'] = 10
+        self.assertTrue(self._validate(config))
+
+    def test_within_memory_budget(self):
+        """Config within memory budget should pass"""
+        config = self._base_config()
+        # 4g + 4g + 16g = 24g total
+        config['host']['max_memory'] = '24g'
+        self.assertTrue(self._validate(config))
+
+    def test_exceeds_cpu_budget(self):
+        """Config exceeding CPU budget should fail with itemized error"""
+        config = self._base_config()
+        # 2 + 2 + 6 = 10, limit is 8
+        config['host']['max_cpus'] = 8
+        self.assertFalse(self._validate(config))
+
+    def test_exceeds_memory_budget(self):
+        """Config exceeding memory budget should fail with itemized error"""
+        config = self._base_config()
+        # 4g + 4g + 16g = 24g, limit is 16g
+        config['host']['max_memory'] = '16g'
+        self.assertFalse(self._validate(config))
+
+    def test_null_size_with_cpu_limit_errors(self):
+        """Size with null cpus should error when max_cpus is set"""
+        config = self._base_config()
+        config['sizes']['max'] = {'cpus': None, 'mem_limit': '64g'}
+        config['host']['max_cpus'] = 32
+        self.assertFalse(self._validate(config))
+
+    def test_null_size_with_memory_limit_errors(self):
+        """Size with null mem_limit should error when max_memory is set"""
+        config = self._base_config()
+        config['sizes']['max'] = {'cpus': 16.0, 'mem_limit': None}
+        config['host']['max_memory'] = '128g'
+        self.assertFalse(self._validate(config))
+
+    def test_minus_one_disables_cpu_check(self):
+        """max_cpus: -1 should skip the CPU budget check"""
+        config = self._base_config()
+        config['host']['max_cpus'] = -1
+        # Would fail if checked: 2+2+6 = 10 > 0
+        self.assertTrue(self._validate(config))
+
+    def test_minus_one_disables_memory_check(self):
+        """max_memory: -1 should skip the memory budget check"""
+        config = self._base_config()
+        config['host']['max_memory'] = -1
+        self.assertTrue(self._validate(config))
+
+    def test_omitted_skips_cpu_check(self):
+        """Omitted max_cpus should skip the CPU budget check"""
+        config = self._base_config()
+        # No max_cpus key at all
+        self.assertTrue(self._validate(config))
+
+    def test_omitted_skips_memory_check(self):
+        """Omitted max_memory should skip the memory budget check"""
+        config = self._base_config()
+        # No max_memory key at all
+        self.assertTrue(self._validate(config))
+
+    def test_exact_cpu_budget_passes(self):
+        """Total CPU exactly equal to max_cpus should pass"""
+        config = self._base_config()
+        config['runners'] = ['cpu-small-1']
+        config['host']['max_cpus'] = 2.0
+        self.assertTrue(self._validate(config))
+
+    def test_exact_memory_budget_passes(self):
+        """Total memory exactly equal to max_memory should pass"""
+        config = self._base_config()
+        config['runners'] = ['cpu-small-1']
+        config['host']['max_memory'] = '4g'
+        self.assertTrue(self._validate(config))
+
+    def test_invalid_max_cpus_value(self):
+        """Non-numeric max_cpus should fail validation"""
+        config = self._base_config()
+        config['host']['max_cpus'] = 'abc'
+        self.assertFalse(self._validate(config))
+
+    def test_invalid_max_memory_value(self):
+        """Invalid max_memory format should fail validation"""
+        config = self._base_config()
+        config['host']['max_memory'] = 'abc'
+        self.assertFalse(self._validate(config))
+
+    def test_both_budgets_enforced(self):
+        """Both CPU and memory budgets enforced simultaneously"""
+        config = self._base_config()
+        config['host']['max_cpus'] = 100
+        config['host']['max_memory'] = '1g'  # 4+4+16 = 24g > 1g
+        self.assertFalse(self._validate(config))
 
 
 if __name__ == '__main__':
