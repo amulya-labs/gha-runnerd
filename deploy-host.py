@@ -234,6 +234,27 @@ def is_valid_url_template(value, placeholders) -> bool:
     return all(f'{{{p}}}' in value for p in placeholders)
 
 
+_MEMORY_UNITS = {'k': 1024, 'm': 1024**2, 'g': 1024**3, 't': 1024**4}
+
+
+def parse_systemd_memory_to_bytes(value: str) -> int:
+    """Convert a systemd memory string like '4g' or '512M' to bytes."""
+    if not is_valid_systemd_memory(value):
+        raise ValueError(f"Invalid systemd memory value: {value!r}")
+    number = int(value[:-1])
+    unit = value[-1].lower()
+    return number * _MEMORY_UNITS[unit]
+
+
+def format_bytes_human(num_bytes: int) -> str:
+    """Format bytes as a human-readable string (e.g., '64g', '512M')."""
+    for unit in ['T', 'G', 'M', 'K']:
+        divisor = _MEMORY_UNITS[unit.lower()]
+        if num_bytes >= divisor and num_bytes % divisor == 0:
+            return f"{num_bytes // divisor}{unit}"
+    return f"{num_bytes}B"
+
+
 class RunnerConfig:
     """Parsed runner configuration"""
 
@@ -671,6 +692,114 @@ class HostDeployer:
         if len(runner_names) != len(set(runner_names)):
             duplicates = [name for name in runner_names if runner_names.count(name) > 1]
             errors.append(f"Duplicate runner names found: {set(duplicates)}")
+
+        # Resource budget validation (max_cpus / max_memory)
+        max_cpus = host_config.get('max_cpus')
+        max_memory = host_config.get('max_memory')
+
+        check_cpu_budget = max_cpus is not None and max_cpus != -1
+        check_mem_budget = max_memory is not None and max_memory != -1
+
+        # Validate the limit values themselves
+        if check_cpu_budget and not is_positive_number(max_cpus):
+            errors.append(
+                f"host.max_cpus must be a positive number or -1 to disable, "
+                f"got {max_cpus!r}"
+            )
+            check_cpu_budget = False
+
+        if check_mem_budget:
+            if not is_valid_systemd_memory(str(max_memory)):
+                errors.append(
+                    f"host.max_memory must be a systemd memory value "
+                    f"like '64G' or '32g', or -1 to disable, got {max_memory!r}"
+                )
+                check_mem_budget = False
+
+        # If budget limits are active, require all sizes to have concrete values
+        sizes_config = self.config.get('sizes', {})
+        if check_cpu_budget:
+            for size_name, size_cfg in sizes_config.items():
+                if isinstance(size_cfg, dict) and size_cfg.get('cpus') is None:
+                    errors.append(
+                        f"Size '{size_name}' must define 'cpus' when "
+                        f"host.max_cpus is set"
+                    )
+
+        if check_mem_budget:
+            for size_name, size_cfg in sizes_config.items():
+                if isinstance(size_cfg, dict) and size_cfg.get('mem_limit') is None:
+                    errors.append(
+                        f"Size '{size_name}' must define 'mem_limit' when "
+                        f"host.max_memory is set"
+                    )
+
+        # Sum runner resources and check against budget (only if no errors so far
+        # for the relevant limit, to avoid cascading failures)
+        if check_cpu_budget or check_mem_budget:
+            cpu_items = []
+            mem_items = []
+            budget_errors_ok = True
+
+            for runner_name in self.config.get('runners', []):
+                try:
+                    runner = RunnerConfig(runner_name, self.config)
+                    size_cfg = runner.size_config
+                    cpus_val = size_cfg.get('cpus')
+                    mem_val = size_cfg.get('mem_limit')
+
+                    if check_cpu_budget and cpus_val is not None:
+                        cpu_items.append((runner_name, float(cpus_val)))
+                    elif check_cpu_budget and cpus_val is None:
+                        budget_errors_ok = False
+
+                    if check_mem_budget and mem_val is not None:
+                        try:
+                            mem_items.append(
+                                (runner_name, parse_systemd_memory_to_bytes(str(mem_val)))
+                            )
+                        except ValueError:
+                            budget_errors_ok = False
+                    elif check_mem_budget and mem_val is None:
+                        budget_errors_ok = False
+                except ValueError:
+                    budget_errors_ok = False
+
+            if budget_errors_ok and check_cpu_budget and cpu_items:
+                total_cpus = sum(v for _, v in cpu_items)
+                if total_cpus > float(max_cpus):
+                    lines = [
+                        f"Total CPU ({total_cpus:.1f}) exceeds "
+                        f"host.max_cpus ({float(max_cpus):.1f}):"
+                    ]
+                    max_name_len = max(len(n) for n, _ in cpu_items)
+                    for name, val in cpu_items:
+                        lines.append(f"  {name:{max_name_len}s}  {val:>6.1f}")
+                    lines.append(f"  {'':>{max_name_len}s}  {'-----':>6s}")
+                    lines.append(
+                        f"  {'Total':{max_name_len}s}  {total_cpus:>6.1f}"
+                    )
+                    errors.append('\n'.join(lines))
+
+            if budget_errors_ok and check_mem_budget and mem_items:
+                total_mem = sum(v for _, v in mem_items)
+                max_mem_bytes = parse_systemd_memory_to_bytes(str(max_memory))
+                if total_mem > max_mem_bytes:
+                    lines = [
+                        f"Total memory ({format_bytes_human(total_mem)}) exceeds "
+                        f"host.max_memory ({format_bytes_human(max_mem_bytes)}):"
+                    ]
+                    max_name_len = max(len(n) for n, _ in mem_items)
+                    for name, val in mem_items:
+                        lines.append(
+                            f"  {name:{max_name_len}s}  {format_bytes_human(val):>6s}"
+                        )
+                    lines.append(f"  {'':>{max_name_len}s}  {'-----':>6s}")
+                    lines.append(
+                        f"  {'Total':{max_name_len}s}  "
+                        f"{format_bytes_human(total_mem):>6s}"
+                    )
+                    errors.append('\n'.join(lines))
 
         # Print results
         if errors:
