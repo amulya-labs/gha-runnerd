@@ -562,6 +562,40 @@ This will:
 
 **Note:** The runner will auto-remove from GitHub after 30 days offline.
 
+### Crash-Loop Protection
+
+Runner units are generated with a systemd start limit:
+
+```ini
+[Unit]
+StartLimitIntervalSec=3600
+StartLimitBurst=10
+```
+
+`Restart=always` on its own retries forever, so a runner that fails on every
+start sits in `activating (auto-restart)` indefinitely. That state reads as
+healthy in `systemctl list-units` and nothing alerts on it - an outage can hide
+for days. With a start limit systemd gives up and marks the unit `failed`,
+which monitoring can actually see.
+
+Tune or disable it under `systemd:` in your config (`start_limit_burst: 0`
+restores unlimited restarts).
+
+### _diag Log Rotation
+
+The runner writes a `Runner_*.log` per start into `_diag/` and never prunes
+them. A deploy installs `/etc/logrotate.d/gha-runnerd` to bound that growth:
+
+```yaml
+logs:
+  rotate: 7    # rotations to keep
+  maxage: 14   # delete rotated logs older than N days
+```
+
+Rotation is driven by the system logrotate timer rather than the job hook,
+because a runner stuck in a crash loop never runs a job - which is exactly when
+its logs grow fastest.
+
 ### Recover Deregistered Runners
 
 GitHub deletes a runner's registration if the runner has not connected for an

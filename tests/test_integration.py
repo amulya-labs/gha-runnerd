@@ -2798,5 +2798,233 @@ class TestRegistrationDriftDetection(unittest.TestCase):
         self.assertTrue(args.reregister)
 
 
+
+def _systemd_sections(content):
+    """Split a systemd unit file into {section: [directive lines]}."""
+    sections = {}
+    current = None
+    for line in content.splitlines():
+        line = line.strip()
+        if line.startswith('[') and line.endswith(']'):
+            current = line[1:-1]
+            sections[current] = []
+        elif line and current:
+            sections[current].append(line)
+    return sections
+
+
+class TestCrashLoopStartLimit(unittest.TestCase):
+    """Restart=always must not mask a permanently broken runner.
+
+    A runner whose registration GitHub has deleted exits ~1s after every
+    start.  With Restart=always and no start limit, systemd restarts it
+    forever: the unit reports "activating (auto-restart)" rather than
+    "failed", so `systemctl list-units` looks healthy and nothing alerts.
+    A start limit makes systemd give up and mark the unit failed instead.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "test-config.yml"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _deployer(self, systemd=None):
+        config = {
+            'github': {'org': 'test-org', 'prefix': 'test'},
+            'host': {
+                'runner_base': '/srv/gha',
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
+                'label': 'test-host',
+            },
+            'cache': {'base_dir': '/srv/gha-cache', 'permissions': '755'},
+            'runners': ['cpu-medium-1'],
+            'sizes': {
+                'medium': {'cpus': 4.0, 'mem_limit': '16G', 'pids_limit': 4096},
+            },
+            'runner': {'version': '2.321.0', 'arch': 'linux-x64'},
+        }
+        if systemd is not None:
+            config['systemd'] = systemd
+        with open(self.config_file, 'w') as f:
+            yaml.dump(config, f)
+        return HostDeployer(config_path=str(self.config_file))
+
+    def test_unit_has_start_limit_by_default(self):
+        """A default deployment gets a start limit, not an infinite loop"""
+        d = self._deployer()
+        sections = _systemd_sections(d.generate_service_content(d.runners[0]))
+        self.assertIn('StartLimitIntervalSec=3600', sections['Unit'])
+        self.assertIn('StartLimitBurst=10', sections['Unit'])
+
+    def test_start_limit_lives_in_unit_section(self):
+        """systemd reads StartLimit* from [Unit], not [Service]"""
+        d = self._deployer()
+        sections = _systemd_sections(d.generate_service_content(d.runners[0]))
+        service = ' '.join(sections['Service'])
+        self.assertNotIn('StartLimitIntervalSec', service)
+        self.assertNotIn('StartLimitBurst', service)
+
+    def test_start_limit_is_configurable(self):
+        """Operators can tune the limit"""
+        d = self._deployer(systemd={
+            'start_limit_interval_sec': 600,
+            'start_limit_burst': 3,
+        })
+        sections = _systemd_sections(d.generate_service_content(d.runners[0]))
+        self.assertIn('StartLimitIntervalSec=600', sections['Unit'])
+        self.assertIn('StartLimitBurst=3', sections['Unit'])
+
+    def test_start_limit_burst_zero_disables_limit(self):
+        """burst 0 is systemd's "no limit" - opt back into old behaviour"""
+        d = self._deployer(systemd={'start_limit_burst': 0})
+        sections = _systemd_sections(d.generate_service_content(d.runners[0]))
+        self.assertIn('StartLimitBurst=0', sections['Unit'])
+
+    def test_restart_directives_still_in_service_section(self):
+        """The extraction must not move Restart= out of [Service]"""
+        d = self._deployer()
+        sections = _systemd_sections(d.generate_service_content(d.runners[0]))
+        self.assertIn('Restart=always', sections['Service'])
+        self.assertIn('RestartSec=10', sections['Service'])
+
+    def test_resource_limits_preserved(self):
+        """The extraction must not drop the size-derived limits"""
+        d = self._deployer()
+        sections = _systemd_sections(d.generate_service_content(d.runners[0]))
+        self.assertIn('CPUQuota=400%', sections['Service'])
+        self.assertIn('MemoryMax=16G', sections['Service'])
+        self.assertIn('TasksMax=4096', sections['Service'])
+
+    def test_negative_start_limit_burst_rejected(self):
+        """A negative burst is not a valid systemd value"""
+        d = self._deployer(systemd={'start_limit_burst': -1})
+        self.assertFalse(d.validate_config())
+
+    def test_non_integer_start_limit_interval_rejected(self):
+        """A non-integer interval is not a valid systemd value"""
+        d = self._deployer(systemd={'start_limit_interval_sec': 'soon'})
+        self.assertFalse(d.validate_config())
+
+
+class TestDiagLogRotation(unittest.TestCase):
+    """_diag grows without bound; a crash loop turns that into gigabytes.
+
+    The runner writes a Runner_*.log per start.  Eight days of restarting
+    every 10 seconds produced ~7.5GB across six runners.  Job-triggered
+    cleanup cannot help here -- during a crash loop no jobs ever run -- so
+    rotation has to be driven from outside the runner.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "test-config.yml"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _deployer(self, logs=None, runner_base='/srv/gha'):
+        config = {
+            'github': {'org': 'test-org', 'prefix': 'test'},
+            'host': {
+                'runner_base': runner_base,
+                'docker_socket': '/var/run/docker.sock',
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
+                'label': 'test-host',
+            },
+            'cache': {'base_dir': '/srv/gha-cache', 'permissions': '755'},
+            'runners': ['cpu-medium-1'],
+            'sizes': {'medium': {'cpus': 4.0, 'mem_limit': '16G'}},
+            'runner': {'version': '2.321.0', 'arch': 'linux-x64'},
+        }
+        if logs is not None:
+            config['logs'] = logs
+        with open(self.config_file, 'w') as f:
+            yaml.dump(config, f)
+        return HostDeployer(config_path=str(self.config_file))
+
+    def test_logrotate_covers_diag_directory(self):
+        """Rotation targets the runner _diag logs under the configured base"""
+        content = self._deployer().generate_logrotate_content()
+        self.assertIn('/srv/gha/*/_diag/*.log', content)
+
+    def test_logrotate_follows_runner_base(self):
+        """A non-default runner_base is honoured"""
+        content = self._deployer(runner_base='/data/runners').generate_logrotate_content()
+        self.assertIn('/data/runners/*/_diag/*.log', content)
+
+    def test_logrotate_bounds_retention_and_size(self):
+        """Defaults bound both how many rotations and how old logs get"""
+        content = self._deployer().generate_logrotate_content()
+        self.assertIn('rotate 7', content)
+        self.assertIn('maxage 14', content)
+
+    def test_logrotate_retention_configurable(self):
+        """Operators can tune retention"""
+        content = self._deployer(logs={'rotate': 3, 'maxage': 5}).generate_logrotate_content()
+        self.assertIn('rotate 3', content)
+        self.assertIn('maxage 5', content)
+
+    def test_logrotate_does_not_signal_the_runner(self):
+        """copytruncate: the runner holds the file open and gets no HUP"""
+        content = self._deployer().generate_logrotate_content()
+        self.assertIn('copytruncate', content)
+        self.assertIn('missingok', content)
+
+    def test_logrotate_runs_as_runner_user(self):
+        """_diag is owned by the runner user, so rotation must match"""
+        content = self._deployer().generate_logrotate_content()
+        self.assertIn('su 1003 1003', content)
+
+    def test_deploy_installs_logrotate_config(self):
+        """A deployment actually installs the rotation config"""
+        d = self._deployer()
+        calls = []
+
+        def fake_run_cmd(cmd, check=True, capture=False, sudo=False,
+                         dry_run_msg=None, sudo_reason=None):
+            calls.append(list(cmd))
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            return result
+
+        # Keep configure_logrotate real; stub the surrounding deploy steps.
+        for name in ('ensure_directories', 'cleanup_removed_runners',
+                     'configure_sudoers', 'install_dependencies',
+                     'install_runner_binary', 'register_runner',
+                     'create_cleanup_hook', 'create_systemd_service',
+                     'sync_labels_via_api', 'print_summary'):
+            patcher = patch.object(HostDeployer, name)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        ok = patch.object(HostDeployer, 'ensure_github_token', return_value=True)
+        ok.start()
+        self.addCleanup(ok.stop)
+
+        with patch.object(deploy_host, 'check_requirements'), \
+             patch.object(deploy_host, 'run_cmd', side_effect=fake_run_cmd):
+            d.deploy()
+
+        installed = [c for c in calls
+                     if c[0] == 'cp' and c[-1] == '/etc/logrotate.d/gha-runnerd']
+        self.assertTrue(
+            installed,
+            "deploy() never installed the logrotate config, so _diag still grows unbounded"
+        )
+
+    def test_invalid_rotate_rejected(self):
+        """Negative retention is rejected by validation"""
+        d = self._deployer(logs={'rotate': -1})
+        self.assertFalse(d.validate_config())
+
+
 if __name__ == '__main__':
     unittest.main()
