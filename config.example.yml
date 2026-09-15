@@ -110,6 +110,17 @@ github_api:
 systemd:
   restart_policy: "always"  # Restart policy (always, on-failure, no)
   restart_sec: 10  # Seconds to wait before restarting
+  # Bound Restart=always. Without a start limit a permanently broken runner
+  # (e.g. one GitHub has deregistered) restarts forever and shows as
+  # "activating (auto-restart)" rather than "failed" - it looks healthy and
+  # never alerts. Set start_limit_burst to 0 to disable the limit.
+  start_limit_interval_sec: 3600  # Window for counting start attempts
+  start_limit_burst: 10  # Starts allowed in that window before giving up
+
+# Rotation for the runner's _diag logs, which the runner never prunes itself
+logs:
+  rotate: 7  # Rotations to keep
+  maxage: 14  # Delete rotated logs older than this many days
 
 # Sudoers configuration for workspace cleanup
 sudoers:

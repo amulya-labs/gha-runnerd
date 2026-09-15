@@ -411,6 +411,16 @@ class HostDeployer:
         config.setdefault('systemd', {})
         config['systemd'].setdefault('restart_policy', 'always')
         config['systemd'].setdefault('restart_sec', 10)
+        # Bound Restart=always so a permanently broken runner ends up in
+        # systemd's "failed" state instead of restarting forever.  10 starts
+        # per hour is far more than binary auto-updates need, and a runner
+        # crashing on startup trips it in under two minutes.
+        config['systemd'].setdefault('start_limit_interval_sec', 3600)
+        config['systemd'].setdefault('start_limit_burst', 10)
+
+        config.setdefault('logs', {})
+        config['logs'].setdefault('rotate', 7)
+        config['logs'].setdefault('maxage', 14)
 
         config.setdefault('sudoers', {})
         config['sudoers'].setdefault('path', '/etc/sudoers.d/gha-runner-cleanup')
@@ -673,6 +683,27 @@ class HostDeployer:
                 f"systemd.restart_policy '{restart_policy}' is invalid — "
                 f"must be one of: {', '.join(valid_restart_policies)}"
             )
+        start_limit_interval = systemd_config.get('start_limit_interval_sec')
+        if start_limit_interval is not None and not is_non_negative_int(start_limit_interval):
+            errors.append(
+                f"systemd.start_limit_interval_sec must be a non-negative integer, "
+                f"got {start_limit_interval!r}"
+            )
+        start_limit_burst = systemd_config.get('start_limit_burst')
+        if start_limit_burst is not None and not is_non_negative_int(start_limit_burst):
+            errors.append(
+                f"systemd.start_limit_burst must be a non-negative integer "
+                f"(0 disables the limit), got {start_limit_burst!r}"
+            )
+
+        logs_config = self.config.get('logs', {})
+        for key in ('rotate', 'maxage'):
+            value = logs_config.get(key)
+            if value is not None and not is_non_negative_int(value):
+                errors.append(
+                    f"logs.{key} must be a non-negative integer, got {value!r}"
+                )
+
         restart_sec = systemd_config.get('restart_sec')
         if restart_sec is not None and not is_positive_int(restart_sec):
             errors.append(
@@ -1462,26 +1493,83 @@ Defaults:#{uid} !requiretty
         temp_path.unlink()
         log("Sudoers configured for workspace cleanup", "success")
 
-    def create_systemd_service(self, runner: RunnerConfig):
-        """Create and enable systemd service for runner"""
-        log(f"Creating systemd service for {runner.registered_name}...", "info")
+    def generate_logrotate_content(self) -> str:
+        """Generate the logrotate config for runner _diag logs.
 
-        service_name = f"{runner.service_name}.service"
-        service_path = Path(f"/etc/systemd/system/{service_name}")
+        The runner appends a Runner_*.log per start and never prunes them.
+        Cleanup driven by the job hook cannot help, because a runner stuck in
+        a crash loop never runs a job -- which is exactly when the logs grow
+        fastest.  logrotate runs from the system timer regardless of runner
+        state, so it still fires when the runner is down.
+        """
+        runner_base = self.config['host']['runner_base'].rstrip('/')
+        logs_cfg = self.config.get('logs', {})
+        rotate = logs_cfg.get('rotate', 7)
+        maxage = logs_cfg.get('maxage', 14)
+        uid = self.config['host']['docker_user_uid']
+        gid = self.config['host']['docker_user_gid']
 
+        return f"""# Managed by gha-runnerd - do not edit by hand
+{runner_base}/*/_diag/*.log {{
+    su {uid} {gid}
+    daily
+    rotate {rotate}
+    maxage {maxage}
+    compress
+    delaycompress
+    notifempty
+    missingok
+    copytruncate
+}}
+"""
+
+    def configure_logrotate(self):
+        """Install the logrotate config for runner _diag logs."""
+        logrotate_path = Path("/etc/logrotate.d/gha-runnerd")
+        content = self.generate_logrotate_content()
+
+        log("Configuring _diag log rotation...", "info")
+
+        if DRY_RUN:
+            log_dry_run(f"Write logrotate config to {logrotate_path}")
+            return
+
+        temp_path = Path(f"/tmp/gha-logrotate-{os.getpid()}")
+        try:
+            temp_path.write_text(content)
+            temp_path.chmod(0o644)
+            run_cmd(
+                ["cp", str(temp_path), str(logrotate_path)],
+                sudo=True,
+                sudo_reason="installing logrotate config for runner _diag logs",
+            )
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
+
+        log(f"Log rotation configured at {logrotate_path}", "success")
+
+    def generate_service_content(self, runner: RunnerConfig) -> str:
+        """Generate the systemd unit file content for a runner."""
         uid = self.config['host']['docker_user_uid']
         gid = self.config['host']['docker_user_gid']
         runner_path = runner.runner_path
         size_cfg = runner.size_config
         hook_path = f"{runner_path}/cleanup-workspace.sh"
+        systemd_cfg = self.config['systemd']
 
-        log_debug(f"Service name: {service_name}")
-        log_debug(f"Service path: {service_path}")
+        # StartLimit* belong in [Unit].  Without them Restart=always retries
+        # forever and a permanently broken runner sits in "activating
+        # (auto-restart)" -- which reads as healthy in `systemctl list-units`
+        # and never alerts.  With them systemd gives up and marks it "failed".
+        start_limit_interval = systemd_cfg.get('start_limit_interval_sec', 3600)
+        start_limit_burst = systemd_cfg.get('start_limit_burst', 10)
 
-        # Build service file content
         service_content = f"""[Unit]
 Description=GitHub Actions Runner - {runner.registered_name}
 After=network.target
+StartLimitIntervalSec={start_limit_interval}
+StartLimitBurst={start_limit_burst}
 
 [Service]
 Type=simple
@@ -1520,6 +1608,18 @@ Environment="ACTIONS_RUNNER_HOOK_JOB_STARTED={hook_path}"
 [Install]
 WantedBy=multi-user.target
 """
+        return service_content
+
+    def create_systemd_service(self, runner: RunnerConfig):
+        """Create and enable systemd service for runner"""
+        log(f"Creating systemd service for {runner.registered_name}...", "info")
+
+        service_name = f"{runner.service_name}.service"
+        service_path = Path(f"/etc/systemd/system/{service_name}")
+        service_content = self.generate_service_content(runner)
+
+        log_debug(f"Service name: {service_name}")
+        log_debug(f"Service path: {service_path}")
 
         # Write service file (write to /tmp first, then copy with sudo)
         if DRY_RUN:
@@ -2430,6 +2530,7 @@ WantedBy=multi-user.target
         self.ensure_directories()
         self.cleanup_removed_runners()
         self.configure_sudoers()
+        self.configure_logrotate()
 
         for runner in self.runners:
             log(f"\n>>> Deploying runner: {runner.registered_name}", "header")
