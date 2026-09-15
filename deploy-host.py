@@ -1101,8 +1101,42 @@ class HostDeployer:
 
         log(f"Runner binary installed at {runner_path}", "success")
 
-    def register_runner(self, runner: RunnerConfig):
-        """Register or reconfigure runner with GitHub"""
+    def _is_runner_registered(self, registered_name: str) -> Optional[bool]:
+        """Ask GitHub whether a registration still exists for this runner.
+
+        Returns True if GitHub lists the runner, False if it definitively does
+        not, and None if the answer could not be determined (gh missing, API
+        error, network failure).
+
+        None is NOT evidence of deregistration.  Callers must not re-register
+        on None, or a transient API hiccup would tear down and re-register
+        every runner on the host.  An *offline* runner is still registered and
+        also returns True — only a runner GitHub has dropped returns False.
+        """
+        api_runners = f"{self.api_base}/actions/runners"
+        jq = f'.runners[] | select(.name=="{registered_name}") | .id'
+
+        try:
+            result = run_cmd(
+                self._gh_prefix() + ["gh", "api", "--paginate", api_runners,
+                                     "--jq", jq],
+                check=False, capture=True,
+            )
+        except Exception as e:
+            log_debug(f"Registration check for {registered_name} failed: {e}")
+            return None
+
+        if result is None or result.returncode != 0:
+            log_debug(f"Registration check for {registered_name} gave no answer")
+            return None
+
+        return bool((result.stdout or "").strip())
+
+    def register_runner(self, runner: RunnerConfig, force: bool = False):
+        """Register or reconfigure runner with GitHub.
+
+        force=True skips the idempotency checks and always runs config.sh.
+        """
         token = os.environ.get("REGISTER_GITHUB_RUNNER_TOKEN")
         if not token and not DRY_RUN:
             log("REGISTER_GITHUB_RUNNER_TOKEN not set - skipping registration", "warning")
@@ -1125,7 +1159,9 @@ class HostDeployer:
 
         need_config = True
 
-        if not DRY_RUN:
+        if force:
+            log(f"Forcing re-registration of {runner.registered_name}", "info")
+        elif not DRY_RUN:
             result = run_cmd(
                 ["cat", str(labels_file)],
                 sudo=True, check=False, capture=True,
@@ -1133,11 +1169,17 @@ class HostDeployer:
             if result and result.returncode == 0:
                 current_labels = result.stdout.strip()
                 log_debug(f"Current labels: {current_labels}")
-                if current_labels == runner.labels:
+                if current_labels != runner.labels:
+                    log(f"Labels changed, reconfiguring runner...", "info")
+                elif self._is_runner_registered(runner.registered_name) is False:
+                    # Matching labels on disk are not proof of registration:
+                    # GitHub deletes registrations for runners that have not
+                    # connected recently, leaving local config files intact.
+                    log(f"Runner {runner.registered_name} is no longer registered "
+                        f"with GitHub - reconfiguring", "warning")
+                else:
                     log(f"Runner {runner.registered_name} already configured with correct labels", "info")
                     need_config = False
-                else:
-                    log(f"Labels changed, reconfiguring runner...", "info")
 
         if need_config or DRY_RUN:
             # Always ensure clean state before (re)configuring
@@ -2369,7 +2411,7 @@ WantedBy=multi-user.target
                 pass
             raise
 
-    def deploy(self):
+    def deploy(self, force_reregister: bool = False):
         """Main deployment workflow"""
         log("Starting GitHub Actions Host-Based Runner Deployment", "header")
         log(f"Config: {self.config_path}", "info")
@@ -2393,7 +2435,7 @@ WantedBy=multi-user.target
             log(f"\n>>> Deploying runner: {runner.registered_name}", "header")
             self.install_dependencies(runner)
             self.install_runner_binary(runner)
-            self.register_runner(runner)
+            self.register_runner(runner, force=force_reregister)
             self.create_cleanup_hook(runner)
             self.create_systemd_service(runner)
 
@@ -2401,8 +2443,8 @@ WantedBy=multi-user.target
         self.print_summary()
 
 
-def main():
-    """Entry point"""
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Build the command-line argument parser."""
     parser = argparse.ArgumentParser(
         description="Deploy GitHub Actions self-hosted runners",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -2484,6 +2526,12 @@ Note: The script will prompt for sudo password when needed for system operations
         help='Force removal even if the runner is busy (use with --remove)'
     )
     parser.add_argument(
+        '--reregister',
+        action='store_true',
+        help='Force re-registration of all runners with GitHub, even if local '
+             'config looks current (use when GitHub has dropped the registration)'
+    )
+    parser.add_argument(
         '--upgrade',
         action='store_true',
         help='Upgrade runner binaries for all deployed runners'
@@ -2523,6 +2571,12 @@ Note: The script will prompt for sudo password when needed for system operations
         default=HostDeployer.DEFAULT_CONFIG_PATH,
         help=f'Path to configuration file (default: {HostDeployer.DEFAULT_CONFIG_PATH})'
     )
+    return parser
+
+
+def main():
+    """Entry point"""
+    parser = build_arg_parser()
 
     args = parser.parse_args()
 
@@ -2605,7 +2659,7 @@ Note: The script will prompt for sudo password when needed for system operations
             else:
                 log("\n" + "="*60, "header")
 
-            deployer.deploy()
+            deployer.deploy(force_reregister=args.reregister)
 
     except KeyboardInterrupt:
         log("\nDeployment cancelled by user", "warning")
