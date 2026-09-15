@@ -562,6 +562,34 @@ This will:
 
 **Note:** The runner will auto-remove from GitHub after 30 days offline.
 
+### Recover Deregistered Runners
+
+GitHub deletes a runner's registration if the runner has not connected for an
+extended period. The local config on the host is untouched, so the service keeps
+restarting and failing with:
+
+```
+Failed to create a session. The runner registration has been deleted from the
+server, please re-configure.
+```
+
+A normal deploy detects this automatically — it asks GitHub whether each runner
+is still registered and re-runs `config.sh` for any that are not:
+
+```bash
+./deploy-host.py
+```
+
+To force re-registration regardless of what the check reports:
+
+```bash
+./deploy-host.py --reregister
+```
+
+Use `--reregister` when the API check cannot reach GitHub (it deliberately does
+*not* re-register on an inconclusive answer, so a transient API failure never
+churns the whole host).
+
 ### Upgrade Runner Binaries
 
 Upgrade all deployed runners to a new version:

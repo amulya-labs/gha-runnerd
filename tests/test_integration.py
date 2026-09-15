@@ -2630,5 +2630,173 @@ class TestResourceBudgetValidation(unittest.TestCase):
         self.assertFalse(self._validate(config))
 
 
+
+class TestRegistrationDriftDetection(unittest.TestCase):
+    """Deploy must re-register runners GitHub has deregistered.
+
+    GitHub deletes registrations for runners that have not connected
+    recently.  When that happens the runner's local .labels file is still
+    intact and still matches config.yml, so a labels-only idempotency check
+    concludes "already configured" and never runs config.sh — the deploy
+    reports success while the runner stays invisible to GitHub.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_file = Path(self.temp_dir) / "test-config.yml"
+        config = {
+            'github': {
+                'scope': 'enterprise',
+                'enterprise': 'test-ent',
+                'prefix': 'test',
+                'runner_group': {'name': 'test-group'},
+            },
+            'host': {
+                'runner_base': self.temp_dir,
+                'docker_user_uid': 1003,
+                'docker_user_gid': 1003,
+                'label': 'test-host',
+            },
+            'cache': {'base_dir': '/srv/gha-cache', 'permissions': '755'},
+            'runners': ['cpu-medium-1'],
+            'sizes': {
+                'medium': {'cpus': 4.0, 'mem_limit': '16G', 'pids_limit': 4096},
+            },
+            'runner': {'version': '2.321.0', 'arch': 'linux-x64'},
+        }
+        with open(self.config_file, 'w') as f:
+            yaml.dump(config, f)
+
+        self.deployer = HostDeployer(str(self.config_file))
+        self.runner = self.deployer.runners[0]
+
+        self.token_patcher = patch.dict(
+            os.environ, {"REGISTER_GITHUB_RUNNER_TOKEN": "x" * 40}
+        )
+        self.token_patcher.start()
+        self.addCleanup(self.token_patcher.stop)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _fake_run_cmd(self, gh_returncode=0, gh_stdout=""):
+        """Fake run_cmd that records every command and answers the two
+        queries register_runner makes: reading .labels, and asking GitHub
+        whether the runner is still registered.
+        """
+        calls = []
+
+        def fake(cmd, check=True, capture=False, sudo=False,
+                 dry_run_msg=None, sudo_reason=None):
+            calls.append(list(cmd))
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+
+            if cmd[0] == "cat" and cmd[-1].endswith(".labels"):
+                # On-disk labels still match config exactly
+                result.stdout = self.runner.labels
+            elif "gh" in cmd:
+                result.returncode = gh_returncode
+                result.stdout = gh_stdout
+            elif cmd[0] == "systemctl" and "is-active" in cmd:
+                result.returncode = 1  # service not running
+
+            return result
+
+        return fake, calls
+
+    @staticmethod
+    def _ran_config_sh(calls):
+        """True if config.sh was invoked to (re)register the runner."""
+        for cmd in calls:
+            joined = " ".join(cmd)
+            if "config.sh" in joined and "--url" in joined:
+                return True
+        return False
+
+    def test_reregisters_when_github_has_no_registration(self):
+        """Labels match but GitHub does not know the runner -> re-register"""
+        fake, calls = self._fake_run_cmd(gh_returncode=0, gh_stdout="")
+
+        with patch.object(deploy_host, 'run_cmd', side_effect=fake):
+            self.deployer.register_runner(self.runner)
+
+        self.assertTrue(
+            self._ran_config_sh(calls),
+            "config.sh was never run, so the deregistered runner stays dead"
+        )
+
+    def test_skips_reregistration_when_github_still_has_runner(self):
+        """Labels match and GitHub still lists the runner -> no churn"""
+        fake, calls = self._fake_run_cmd(gh_returncode=0, gh_stdout="272")
+
+        with patch.object(deploy_host, 'run_cmd', side_effect=fake):
+            self.deployer.register_runner(self.runner)
+
+        self.assertFalse(
+            self._ran_config_sh(calls),
+            "re-registered a runner that was already registered"
+        )
+
+    def test_skips_reregistration_when_github_query_fails(self):
+        """A failed API query is not evidence of deregistration -> no churn"""
+        fake, calls = self._fake_run_cmd(gh_returncode=1, gh_stdout="")
+
+        with patch.object(deploy_host, 'run_cmd', side_effect=fake):
+            self.deployer.register_runner(self.runner)
+
+        self.assertFalse(
+            self._ran_config_sh(calls),
+            "a transient gh failure must not trigger mass re-registration"
+        )
+
+    def test_is_runner_registered_reports_absent(self):
+        """Empty gh output means GitHub has no such runner"""
+        fake, _ = self._fake_run_cmd(gh_returncode=0, gh_stdout="")
+        with patch.object(deploy_host, 'run_cmd', side_effect=fake):
+            self.assertIs(
+                self.deployer._is_runner_registered(self.runner.registered_name),
+                False
+            )
+
+    def test_is_runner_registered_reports_present(self):
+        """A runner id in gh output means GitHub still has the registration"""
+        fake, _ = self._fake_run_cmd(gh_returncode=0, gh_stdout="272")
+        with patch.object(deploy_host, 'run_cmd', side_effect=fake):
+            self.assertIs(
+                self.deployer._is_runner_registered(self.runner.registered_name),
+                True
+            )
+
+    def test_is_runner_registered_reports_unknown_on_error(self):
+        """A failed gh call is unknown, not absent"""
+        fake, _ = self._fake_run_cmd(gh_returncode=1, gh_stdout="")
+        with patch.object(deploy_host, 'run_cmd', side_effect=fake):
+            self.assertIsNone(
+                self.deployer._is_runner_registered(self.runner.registered_name)
+            )
+
+    def test_reregister_flag_forces_registration(self):
+        """--reregister re-runs config.sh even when everything looks fine"""
+        fake, calls = self._fake_run_cmd(gh_returncode=0, gh_stdout="272")
+
+        with patch.object(deploy_host, 'run_cmd', side_effect=fake):
+            self.deployer.register_runner(self.runner, force=True)
+
+        self.assertTrue(
+            self._ran_config_sh(calls),
+            "--reregister must bypass both the labels and registration checks"
+        )
+
+    def test_reregister_flag_exists(self):
+        """The CLI exposes --reregister"""
+        parser = deploy_host.build_arg_parser()
+        args = parser.parse_args(['--reregister'])
+        self.assertTrue(args.reregister)
+
+
 if __name__ == '__main__':
     unittest.main()
