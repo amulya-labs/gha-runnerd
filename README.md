@@ -1268,7 +1268,7 @@ When Docker containers run as root (the default), they can create files that the
 
 This creates:
 - `/srv/gha/{runner}/cleanup-workspace.sh` - runs before each job, fixes `_work/` ownership and removes `$HOME/.local/` to prevent cross-container tool contamination
-- `/etc/sudoers.d/gha-runner-cleanup` - allows runner to `chown` workspace and `.local` directories
+- `/etc/sudoers.d/gha-runner-cleanup` - allows runner to `chown` each configured runner's `_work` and `.local` directories (explicit per-runner entries, regenerated on every deploy; compatible with classic sudo and sudo-rs)
 
 ### Cache Not Working
 

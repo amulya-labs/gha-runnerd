@@ -222,6 +222,11 @@ def is_absolute_path(value) -> bool:
     return isinstance(value, str) and value.startswith('/')
 
 
+def is_sudoers_safe_path(value) -> bool:
+    """Path with no characters that are special in a sudoers command spec."""
+    return isinstance(value, str) and bool(re.fullmatch(r'[A-Za-z0-9/._-]+', value))
+
+
 def is_valid_slug(value) -> bool:
     """Alphanumeric (may start with letter or digit) plus hyphens."""
     return isinstance(value, str) and bool(re.match(r'^[a-zA-Z0-9][a-zA-Z0-9-]*$', value))
@@ -545,6 +550,11 @@ class HostDeployer:
         elif not is_absolute_path(runner_base):
             errors.append(
                 f"Host runner_base '{runner_base}' must be an absolute path"
+            )
+        elif not is_sudoers_safe_path(runner_base):
+            errors.append(
+                f"Host runner_base '{runner_base}' may only contain letters, digits, "
+                f"'/', '.', '_' and '-' (it is written into a sudoers rule)"
             )
         if not host_config.get('label'):
             errors.append("Host label not configured")
@@ -1355,13 +1365,23 @@ class HostDeployer:
         except Exception:
             log("Could not deregister old runner (will re-register with --replace)", "warning")
 
+    def _sudo_chown_paths(self, runner: RunnerConfig):
+        """Return the (_work, .local) paths the cleanup hook chowns via sudo.
+
+        sudo matches command arguments literally, so the hook and the sudoers
+        rule must both take these exact strings from here.
+        """
+        runner_path = Path(runner.runner_path)
+        return str(runner_path / "_work"), str(runner_path / ".local")
+
     def generate_hook_content(self, runner: RunnerConfig):
         """Generate the pre-job cleanup hook script content"""
         runner_path = Path(runner.runner_path)
-        work_path = runner_path / "_work"
+        work_path, home_local = self._sudo_chown_paths(runner)
 
         uid = self.config['host']['docker_user_uid']
         gid = self.config['host']['docker_user_gid']
+        sudoers_path = self.config['sudoers']['path']
 
         # The GitHub Actions runner bind-mounts _work/_temp/_github_home as
         # /github/home inside containers (HOME=/github/home).  Tool installers
@@ -1378,8 +1398,11 @@ class HostDeployer:
 WORK_DIR="{work_path}"
 
 if [ -d "$WORK_DIR" ]; then
-    # Fix ownership of any files not owned by the runner user
-    sudo /usr/bin/chown -R {uid}:{gid} "$WORK_DIR" 2>/dev/null || true
+    # Fix ownership of any files not owned by the runner user.
+    # A failure must not fail the job, but it is reported in the job log.
+    if ! sudo -n /usr/bin/chown -R {uid}:{gid} "$WORK_DIR"; then
+        echo "[cleanup-hook] WARNING: sudo chown failed for $WORK_DIR (see {sudoers_path})" >&2
+    fi
 fi
 
 # Remove tool installations from previous container runs
@@ -1395,10 +1418,12 @@ if [ -d "$CONTAINER_HOME_LOCAL" ]; then
 fi
 
 # Non-container (host) jobs: HOME is {runner_path}, so .local is here
-HOME_LOCAL="{runner_path}/.local"
+HOME_LOCAL="{home_local}"
 if [ -d "$HOME_LOCAL" ]; then
     echo "[cleanup-hook] Removing stale $HOME_LOCAL from previous run"
-    sudo /usr/bin/chown -R {uid}:{gid} "$HOME_LOCAL" 2>/dev/null || true
+    if ! sudo -n /usr/bin/chown -R {uid}:{gid} "$HOME_LOCAL"; then
+        echo "[cleanup-hook] WARNING: sudo chown failed for $HOME_LOCAL (see {sudoers_path})" >&2
+    fi
     rm -rf "$HOME_LOCAL" 2>/dev/null || true
 fi
 """
@@ -1440,15 +1465,41 @@ fi
         log(f"Cleanup hook created at {hook_path}", "success")
 
     def generate_sudoers_content(self):
-        """Generate the sudoers configuration content"""
+        """Generate the sudoers configuration content.
+
+        Each configured runner's paths are listed explicitly. sudo-rs rejects
+        wildcards in command arguments, and under classic sudo '*' also matches
+        '/', so a glob allowed more than intended. The rule therefore has to be
+        regenerated whenever runners are added or removed.
+
+        Raises ValueError if a path contains characters that are special in
+        sudoers.
+        """
         uid = self.config['host']['docker_user_uid']
         gid = self.config['host']['docker_user_gid']
-        base = self.config['host']['runner_base']
 
-        return f"""# Allow GitHub Actions runner user to fix workspace and tool installation permissions
-# Managed by deploy-host.py - do not edit manually
-Defaults:#{uid} !requiretty
-#{uid} ALL=(root) NOPASSWD: /usr/bin/chown -R {uid}\\:{gid} {base}/*/_work, /usr/bin/chown -R {uid}\\:{gid} {base}/*/_work/*, /usr/bin/chown -R {uid}\\:{gid} {base}/*/.local
+        commands = []
+        for runner in self.runners:
+            for path in self._sudo_chown_paths(runner):
+                if not is_sudoers_safe_path(path):
+                    raise ValueError(
+                        f"Path '{path}' contains characters that are not allowed "
+                        f"in a sudoers rule (allowed: letters, digits, '/', '.', '_', '-')"
+                    )
+                commands.append(f"/usr/bin/chown -R {uid}\\:{gid} {path}")
+
+        content = (
+            "# Allow GitHub Actions runner user to fix workspace and tool installation permissions\n"
+            "# Managed by deploy-host.py - do not edit manually\n"
+        )
+        if not commands:
+            return content
+
+        alias_body = ", \\\n    ".join(commands)
+        return content + f"""Cmnd_Alias GHA_RUNNERD_CHOWN = \\
+    {alias_body}
+
+#{uid} ALL=(root) NOPASSWD: GHA_RUNNERD_CHOWN
 """
 
     def configure_sudoers(self):
@@ -1457,7 +1508,11 @@ Defaults:#{uid} !requiretty
 
         log("Configuring sudoers for workspace cleanup...", "info")
 
-        sudoers_content = self.generate_sudoers_content()
+        try:
+            sudoers_content = self.generate_sudoers_content()
+        except ValueError as e:
+            log(f"Cannot generate sudoers configuration: {e}", "error")
+            sys.exit(1)
 
         # Write to /tmp first (user-writable), then move with sudo
         temp_path = Path(f"/tmp/gha-runner-cleanup-{os.getpid()}.sudoers")
