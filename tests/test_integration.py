@@ -15,7 +15,7 @@ import tempfile
 import os
 import sys
 import re
-from fnmatch import fnmatch
+import shutil
 from pathlib import Path
 
 # Add parent directory to path to import deploy-host module
@@ -375,7 +375,7 @@ class TestCleanupHook(unittest.TestCase):
     def test_hook_contains_workspace_chown(self):
         """Test that hook fixes ownership of _work directory"""
         content = self.deployer.generate_hook_content(self.runner)
-        self.assertIn('sudo /usr/bin/chown -R 1003:1003 "$WORK_DIR"', content)
+        self.assertIn('sudo -n /usr/bin/chown -R 1003:1003 "$WORK_DIR"', content)
 
     def test_hook_cleans_container_home_local(self):
         """Test that hook cleans .local from the container HOME path (_work/_temp/_github_home)"""
@@ -432,11 +432,34 @@ class TestCleanupHook(unittest.TestCase):
     def test_hook_suppresses_errors(self):
         """Test that hook operations are fault-tolerant (won't fail the job)"""
         content = self.deployer.generate_hook_content(self.runner)
-        # All sudo/rm operations should suppress errors:
-        # 1. workspace chown, 2. container .local rm, 3. host .local chown, 4. host .local rm
-        self.assertEqual(content.count('2>/dev/null || true'), 4,
-                         "Expected 4 fault-tolerant operations: workspace chown, "
-                         "container .local rm, host .local chown, host .local rm")
+        # rm operations discard errors; chown failures are reported instead
+        self.assertEqual(content.count('2>/dev/null || true'), 2,
+                         "Expected 2 silent rm operations: container .local, host .local")
+        self.assertEqual(content.count('if ! sudo -n /usr/bin/chown'), 2,
+                         "Expected 2 reported chown operations: workspace, host .local")
+
+    def test_hook_survives_and_reports_sudo_failure(self):
+        """A rejected sudo prints a warning but the hook still exits 0"""
+        base = Path(self.temp_dir) / 'runners'
+        self.deployer.config['host']['runner_base'] = str(base)
+        runner_path = Path(self.runner.runner_path)
+        (runner_path / '_work').mkdir(parents=True)
+        (runner_path / '.local').mkdir()
+        bin_dir = Path(self.temp_dir) / 'bin'
+        bin_dir.mkdir()
+        fake_sudo = bin_dir / 'sudo'
+        fake_sudo.write_text('#!/bin/sh\necho "sudo: a password is required" >&2\nexit 1\n')
+        fake_sudo.chmod(0o755)
+        hook = Path(self.temp_dir) / 'cleanup-workspace.sh'
+        hook.write_text(self.deployer.generate_hook_content(self.runner))
+
+        env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
+        result = subprocess.run(['bash', str(hook)], capture_output=True, text=True, env=env, check=False)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr.count('[cleanup-hook] WARNING'), 2, result.stderr)
+        self.assertIn('sudo: a password is required', result.stderr)
+        self.assertFalse((runner_path / '.local').exists())
 
 
 class TestSudoersContent(unittest.TestCase):
@@ -467,26 +490,85 @@ class TestSudoersContent(unittest.TestCase):
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
+    def _deployer_with(self, runners=None, **host_overrides):
+        """Build a deployer with extra runners / host settings."""
+        with open(self.config_file) as f:
+            config = yaml.safe_load(f)
+        config['runners'] = runners or config['runners']
+        config['host'].update(host_overrides)
+        with open(self.config_file, 'w') as f:
+            yaml.dump(config, f)
+        return HostDeployer(config_path=str(self.config_file))
+
     def test_sudoers_allows_work_chown(self):
-        """Test that sudoers allows chown on _work directories"""
+        """Test that sudoers allows chown on the runner's _work directory"""
         content = self.deployer.generate_sudoers_content()
-        self.assertIn('/srv/gha/*/_work', content)
+        self.assertIn('/usr/bin/chown -R 1003\\:1003 /srv/gha/test-linux-cpu-small-1/_work,', content)
 
     def test_sudoers_allows_local_chown(self):
-        """Test that sudoers allows chown on .local directories"""
+        """Test that sudoers allows chown on the runner's .local directory"""
         content = self.deployer.generate_sudoers_content()
-        self.assertIn('/srv/gha/*/.local', content)
+        self.assertIn('/usr/bin/chown -R 1003\\:1003 /srv/gha/test-linux-cpu-small-1/.local\n', content)
 
     def test_sudoers_uses_correct_uid_gid(self):
         """Test that sudoers references the configured uid:gid"""
         content = self.deployer.generate_sudoers_content()
-        self.assertIn('#1003 ALL=(root) NOPASSWD:', content)
+        self.assertIn('#1003 ALL=(root) NOPASSWD: GHA_RUNNERD_CHOWN', content)
         self.assertIn('chown -R 1003\\:1003', content)
 
-    def test_sudoers_disables_requiretty(self):
-        """Test that sudoers disables requiretty for the runner user"""
+    def test_sudoers_has_no_requiretty(self):
+        """sudo-rs rejects the requiretty setting (issue #24)"""
         content = self.deployer.generate_sudoers_content()
-        self.assertIn('Defaults:#1003 !requiretty', content)
+        self.assertNotIn('requiretty', content)
+        self.assertNotIn('Defaults', content)
+
+    def test_sudoers_has_no_wildcards(self):
+        """sudo-rs rejects wildcards in command arguments (issue #24)"""
+        content = self.deployer.generate_sudoers_content()
+        self.assertNotIn('*', content)
+
+    def test_sudoers_lists_every_configured_runner(self):
+        """Each runner gets exactly its own _work and .local entries"""
+        deployer = self._deployer_with(runners=['cpu-small-1', 'cpu-small-docker-2'])
+        content = deployer.generate_sudoers_content()
+        for name in ['test-linux-cpu-small-1', 'test-linux-cpu-small-docker-2']:
+            self.assertEqual(content.count(f'/srv/gha/{name}/_work'), 1)
+            self.assertEqual(content.count(f'/srv/gha/{name}/.local'), 1)
+        self.assertEqual(content.count('/usr/bin/chown'), 4)
+
+    def test_sudoers_with_no_runners_has_no_rule(self):
+        """An empty Cmnd_Alias is invalid sudoers, so emit no rule at all"""
+        self.deployer.runners = []
+        content = self.deployer.generate_sudoers_content()
+        self.assertNotIn('Cmnd_Alias', content)
+        self.assertNotIn('NOPASSWD', content)
+
+    def test_sudoers_rejects_unsafe_path(self):
+        """Characters special to sudoers (here ',' and ':') must not reach the file"""
+        deployer = self._deployer_with(runner_base='/srv/gha,ALL:x')
+        with self.assertRaises(ValueError):
+            deployer.generate_sudoers_content()
+
+    def test_configure_sudoers_exits_on_unsafe_path(self):
+        """configure_sudoers reports the bad path instead of crashing"""
+        deployer = self._deployer_with(runner_base='/srv/my gha')
+        with patch.object(deploy_host, 'run_cmd') as run_cmd:
+            with self.assertRaises(SystemExit):
+                deployer.configure_sudoers()
+            run_cmd.assert_not_called()
+
+    @unittest.skipUnless(shutil.which('visudo'), "visudo not installed")
+    def test_sudoers_passes_visudo(self):
+        """Generated file parses with the host's visudo (classic sudo or sudo-rs)"""
+        deployer = self._deployer_with(runners=['cpu-small-1', 'cpu-small-docker-2'])
+        path = Path(self.temp_dir) / 'gha-runner-cleanup'
+        path.write_text(deployer.generate_sudoers_content())
+        path.chmod(0o440)
+        result = subprocess.run(
+            ['visudo', '-c', '-f', str(path)],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class TestHookSudoersConsistency(unittest.TestCase):
@@ -523,53 +605,54 @@ class TestHookSudoersConsistency(unittest.TestCase):
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def _extract_sudoers_chown_globs(self):
-        """Extract the glob patterns from sudoers NOPASSWD chown rules."""
+    def _extract_sudoers_commands(self):
+        """Extract the allowed commands from the sudoers Cmnd_Alias, unescaped."""
         sudoers = self.deployer.generate_sudoers_content()
-        # The sudoers line looks like:
-        #   #1003 ALL=(root) NOPASSWD: /usr/bin/chown -R 1003\:1003 /srv/gha/*/_work, ...
-        # Extract each chown target path (the glob after uid:gid)
-        nopasswd_line = [l for l in sudoers.splitlines() if 'NOPASSWD' in l][0]
-        # Split on commas to get individual rules, extract the path from each
-        rules = nopasswd_line.split('NOPASSWD:')[1].split(',')
-        globs = []
-        for rule in rules:
-            rule = rule.strip()
-            # Each rule is: /usr/bin/chown -R uid\:gid <path>
-            parts = rule.rsplit(' ', 1)
-            if len(parts) == 2:
-                globs.append(parts[1])
-        return globs
+        # The alias looks like:
+        #   Cmnd_Alias GHA_RUNNERD_CHOWN = \
+        #       /usr/bin/chown -R 1003\:1003 /srv/gha/<runner>/_work, \
+        #       ...
+        alias = sudoers.split('Cmnd_Alias GHA_RUNNERD_CHOWN =')[1].split('\n\n')[0]
+        alias = alias.replace('\\\n', ' ')
+        return {cmd.strip().replace('\\:', ':') for cmd in alias.split(',')}
+
+    def _hook_sudo_command(self, hook, var):
+        """Resolve the hook's `sudo -n <cmd> "$VAR"` into the literal command sudo sees."""
+        value = re.search(rf'^{var}="([^"]+)"', hook, re.M).group(1)
+        cmd = re.search(rf'sudo -n (\S+ -R \S+) "\${var}"', hook).group(1)
+        return f'{cmd} {value}'
 
     def test_sudoers_covers_workspace_chown_command(self):
         """Test that the workspace chown in the hook is permitted by sudoers"""
         hook = self.deployer.generate_hook_content(self.runner)
-        globs = self._extract_sudoers_chown_globs()
-
-        # Extract WORK_DIR path from hook
-        match = re.search(r'WORK_DIR="([^"]+)"', hook)
-        work_dir = match.group(1)
-
-        # The workspace path must match at least one sudoers glob
-        self.assertTrue(
-            any(fnmatch(work_dir, g) for g in globs),
-            f"Hook workspace path '{work_dir}' not covered by sudoers globs: {globs}"
-        )
+        commands = self._extract_sudoers_commands()
+        command = self._hook_sudo_command(hook, 'WORK_DIR')
+        self.assertIn(command, commands)
 
     def test_sudoers_covers_host_local_chown_command(self):
         """Test that the host .local chown in the hook is permitted by sudoers"""
         hook = self.deployer.generate_hook_content(self.runner)
-        globs = self._extract_sudoers_chown_globs()
+        commands = self._extract_sudoers_commands()
+        command = self._hook_sudo_command(hook, 'HOME_LOCAL')
+        self.assertIn(command, commands)
 
-        # Extract HOME_LOCAL path from hook
-        match = re.search(r'HOME_LOCAL="([^"]+)"', hook)
-        home_local = match.group(1)
+    def test_sudoers_matches_hook_with_trailing_slash_base(self):
+        """sudo matches arguments literally, so path normalization must agree"""
+        self.deployer.config['host']['runner_base'] = '/srv/gha/'
+        hook = self.deployer.generate_hook_content(self.runner)
+        commands = self._extract_sudoers_commands()
+        self.assertIn(self._hook_sudo_command(hook, 'WORK_DIR'), commands)
+        self.assertIn(self._hook_sudo_command(hook, 'HOME_LOCAL'), commands)
 
-        # The .local path must match at least one sudoers glob
-        self.assertTrue(
-            any(fnmatch(home_local, g) for g in globs),
-            f"Hook host .local path '{home_local}' not covered by sudoers globs: {globs}"
-        )
+    def test_hook_sudo_does_not_hide_failures(self):
+        """A rejected sudo must show up in the job log, not be swallowed (issue #24)"""
+        hook = self.deployer.generate_hook_content(self.runner)
+        chown_lines = [l for l in hook.splitlines() if 'sudo' in l and '/usr/bin/chown' in l]
+        self.assertEqual(len(chown_lines), 2)
+        for line in chown_lines:
+            self.assertIn('sudo -n ', line)
+            self.assertNotIn('2>/dev/null', line)
+        self.assertEqual(hook.count('[cleanup-hook] WARNING: sudo chown failed'), 2)
 
     def test_container_home_local_is_under_work_dir(self):
         """Test that container .local is under _work/ so workspace chown covers it.
@@ -635,7 +718,7 @@ class TestAsymmetricUidGid(unittest.TestCase):
         self.assertNotIn('chown -R 1001\\:1001', content)
         # User identity uses uid, not gid
         self.assertIn('#1001 ALL=(root)', content)
-        self.assertIn('Defaults:#1001', content)
+        self.assertNotIn('#1002 ALL=(root)', content)
 
 
 class TestHookSecurityGuardrails(unittest.TestCase):
@@ -1606,6 +1689,20 @@ class TestConfigValueValidation(unittest.TestCase):
         cfg = self._base_config()
         cfg['cache']['base_dir'] = 'cache/dir'
         self.assertFalse(self._validate(cfg))
+
+    # -- runner_base characters (written into sudoers) --
+
+    def test_runner_base_with_sudoers_special_chars_rejected(self):
+        for base in ['/srv/my gha', '/srv/gha,x', '/srv/gha:x', '/srv/gha=x', '/srv/gha\\x', '/srv/*']:
+            with self.subTest(base=base):
+                cfg = self._base_config()
+                cfg['host']['runner_base'] = base
+                self.assertFalse(self._validate(cfg))
+
+    def test_runner_base_with_dots_and_underscores_accepted(self):
+        cfg = self._base_config()
+        cfg['host']['runner_base'] = '/srv/gha_runners.d/v-1'
+        self.assertTrue(self._validate(cfg))
 
     # -- sudoers.path --
 
